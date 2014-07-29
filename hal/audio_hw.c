@@ -2685,6 +2685,15 @@ static int adev_set_parameters(struct audio_hw_device *dev, const char *kvpairs)
             platform_reset_edid_info(adev->platform);
     }
 
+    ret = str_parms_get_str(parms, AUDIO_PARAMETER_KEY_BT_SCO_WB, value, sizeof(value));
+    if (ret >= 0) {
+        if (strcmp(value, AUDIO_PARAMETER_VALUE_ON) == 0)
+            adev->bt_wb_speech_enabled = true;
+        else
+            adev->bt_wb_speech_enabled = false;
+    }
+
+
     audio_extn_set_parameters(adev, parms);
 
 done:
@@ -3083,6 +3092,8 @@ static int adev_open(const hw_module_t *module, const char *name,
     }
 
     audio_extn_ds2_enable(adev);
+    adev->bt_wb_speech_enabled = false;
+
     *device = &adev->device.common;
 
     audio_device_ref_count++;
