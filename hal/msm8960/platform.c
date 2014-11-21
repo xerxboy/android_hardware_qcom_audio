@@ -645,7 +645,10 @@ snd_device_t platform_get_output_snd_device(void *platform, audio_devices_t devi
             else
                 snd_device = SND_DEVICE_OUT_VOICE_HEADPHONES;
         } else if (devices & AUDIO_DEVICE_OUT_ALL_SCO) {
-            snd_device = SND_DEVICE_OUT_BT_SCO;
+            if (adev->bt_wb_speech_enabled)
+                snd_device = SND_DEVICE_OUT_BT_SCO_WB;
+            else
+                snd_device = SND_DEVICE_OUT_BT_SCO;
         } else if (devices & AUDIO_DEVICE_OUT_SPEAKER) {
             snd_device = SND_DEVICE_OUT_VOICE_SPEAKER;
         } else if (devices & AUDIO_DEVICE_OUT_EARPIECE) {
@@ -689,7 +692,10 @@ snd_device_t platform_get_output_snd_device(void *platform, audio_devices_t devi
         else
             snd_device = SND_DEVICE_OUT_SPEAKER;
     } else if (devices & AUDIO_DEVICE_OUT_ALL_SCO) {
-        snd_device = SND_DEVICE_OUT_BT_SCO;
+        if (adev->bt_wb_speech_enabled)
+            snd_device = SND_DEVICE_OUT_BT_SCO_WB;
+        else
+            snd_device = SND_DEVICE_OUT_BT_SCO;
     } else if (devices & AUDIO_DEVICE_OUT_AUX_DIGITAL) {
         snd_device = SND_DEVICE_OUT_HDMI ;
     } else if (devices & AUDIO_DEVICE_OUT_EARPIECE) {
@@ -755,7 +761,10 @@ snd_device_t platform_get_input_snd_device(void *platform, audio_devices_t out_d
         } else if (out_device & AUDIO_DEVICE_OUT_WIRED_HEADSET) {
             snd_device = SND_DEVICE_IN_VOICE_HEADSET_MIC;
         } else if (out_device & AUDIO_DEVICE_OUT_ALL_SCO) {
-            snd_device = SND_DEVICE_IN_BT_SCO_MIC ;
+            if (adev->bt_wb_speech_enabled)
+                snd_device = SND_DEVICE_IN_BT_SCO_MIC_WB;
+            else
+                snd_device = SND_DEVICE_IN_BT_SCO_MIC;
         } else if (out_device & AUDIO_DEVICE_OUT_SPEAKER) {
             if (my_data->fluence_type != FLUENCE_NONE &&
                 my_data->fluence_in_voice_call &&
@@ -823,7 +832,10 @@ snd_device_t platform_get_input_snd_device(void *platform, audio_devices_t out_d
         } else if (in_device & AUDIO_DEVICE_IN_WIRED_HEADSET) {
             snd_device = SND_DEVICE_IN_HEADSET_MIC;
         } else if (in_device & AUDIO_DEVICE_IN_BLUETOOTH_SCO_HEADSET) {
-            snd_device = SND_DEVICE_IN_BT_SCO_MIC ;
+            if (adev->bt_wb_speech_enabled)
+                snd_device = SND_DEVICE_IN_BT_SCO_MIC_WB;
+            else
+                snd_device = SND_DEVICE_IN_BT_SCO_MIC;
         } else if (in_device & AUDIO_DEVICE_IN_AUX_DIGITAL) {
             snd_device = SND_DEVICE_IN_HDMI_MIC;
         } else {
@@ -841,7 +853,10 @@ snd_device_t platform_get_input_snd_device(void *platform, audio_devices_t out_d
         } else if (out_device & AUDIO_DEVICE_OUT_WIRED_HEADPHONE) {
             snd_device = SND_DEVICE_IN_HANDSET_MIC;
         } else if (out_device & AUDIO_DEVICE_OUT_BLUETOOTH_SCO_HEADSET) {
-            snd_device = SND_DEVICE_IN_BT_SCO_MIC;
+            if (adev->bt_wb_speech_enabled)
+                snd_device = SND_DEVICE_IN_BT_SCO_MIC_WB;
+            else
+                snd_device = SND_DEVICE_IN_BT_SCO_MIC;
         } else if (out_device & AUDIO_DEVICE_OUT_AUX_DIGITAL) {
             snd_device = SND_DEVICE_IN_HDMI_MIC;
         } else {
