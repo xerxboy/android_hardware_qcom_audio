@@ -119,7 +119,7 @@ int is_ms11_supported_fromats(int format)
         (main_format == AUDIO_FORMAT_HE_AAC_V2) ||
         (main_format == AUDIO_FORMAT_AC3) ||
         (main_format == AUDIO_FORMAT_AC3_PLUS) ||
-        (main_format == AUDIO_FORMAT_EAC3))) {
+        (main_format == AUDIO_FORMAT_E_AC3))) {
         return 1;
     } else {
         return 0;
@@ -192,7 +192,7 @@ void get_fragment_size_and_format(struct stream_out *out, int routeFormat, int *
     case AUDIO_FORMAT_AAC_ADIF:
     case AUDIO_FORMAT_AC3:
     case AUDIO_FORMAT_AC3_DM:
-    case AUDIO_FORMAT_EAC3:
+    case AUDIO_FORMAT_E_AC3:
     case AUDIO_FORMAT_EAC3_DM:
         if(routeFormat == ROUTE_UNCOMPRESSED_MCH) {
             frame_size = PCM_16_BITS_PER_SAMPLE * out->channels;
@@ -250,7 +250,7 @@ int get_buffer_length(struct stream_out *out)
         break;
     case AUDIO_FORMAT_AC3:
     case AUDIO_FORMAT_AC3_DM:
-    case AUDIO_FORMAT_EAC3:
+    case AUDIO_FORMAT_E_AC3:
     case AUDIO_FORMAT_EAC3_DM:
         buffer_size = AC3_BUFFER_SIZE;
         break;
@@ -782,7 +782,7 @@ static int open_ms11_instance(struct stream_out *out)
     update format
     */
     if((main_format == AUDIO_FORMAT_AC3) ||
-       (main_format == AUDIO_FORMAT_EAC3)) {
+       (main_format == AUDIO_FORMAT_E_AC3)) {
         /*TODO: who wil setCOMPRESSED_CONVERT_AC3_ASSOC */
         if (out->spdif_format == COMPRESSED_CONVERT_AC3_ASSOC)
             formatMS11 = FORMAT_DOLBY_DIGITAL_PLUS_MAIN_ASSOC;
@@ -1303,7 +1303,7 @@ NOTE: For AAC, the output of MS11 is 48000 for the sample rates greater than
         out->sample_rate = out->sample_rate > 24000 ? 48000 : out->sample_rate;
         out->channels       = 6;
     } else if (main_format == AUDIO_FORMAT_AC3 ||
-               main_format == AUDIO_FORMAT_EAC3) {
+               main_format == AUDIO_FORMAT_E_AC3) {
         /* transcode AC3/EAC3 44.1K to 48K AC3 for non dual-mono clips */
         if (out->sample_rate == 44100 &&
             (subFormat != AUDIO_FORMAT_DOLBY_SUB_DM) &&

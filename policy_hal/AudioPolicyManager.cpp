@@ -2359,7 +2359,7 @@ audio_io_handle_t AudioPolicyManager::getPassthroughOutput(
     }
 
     // Passthrough used for dolby formats and if device is HDMI
-    if ((format == AUDIO_FORMAT_EAC3 || format == AUDIO_FORMAT_AC3 ||
+    if ((format == AUDIO_FORMAT_E_AC3 || format == AUDIO_FORMAT_AC3 ||
          format == AUDIO_FORMAT_E_AC3_JOC) &&
          (device & AUDIO_DEVICE_OUT_AUX_DIGITAL)) {
 
