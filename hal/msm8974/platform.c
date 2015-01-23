@@ -2449,7 +2449,7 @@ unsigned char platform_map_to_edid_format(int audio_format) {
         ALOGV("%s:AAC", __func__);
         format = AAC;
         break;
-    case AUDIO_FORMAT_EAC3:
+    case AUDIO_FORMAT_E_AC3:
         ALOGV("%s:EAC3", __func__);
         format = DOLBY_DIGITAL_PLUS;
         break;
@@ -2567,7 +2567,7 @@ int platform_set_hdmi_format_and_samplerate(struct stream_out *out)
         (out->compr_config.codec->compr_passthr == PASSTHROUGH ||
         out->compr_config.codec->compr_passthr == PASSTHROUGH_CONVERT)) {
         /* TODO: can we add mixer control for channels here avoid setting */
-        if ((out->format == AUDIO_FORMAT_EAC3 ||
+        if ((out->format == AUDIO_FORMAT_E_AC3 ||
             out->format == AUDIO_FORMAT_E_AC3_JOC) &&
             (out->compr_config.codec->compr_passthr == PASSTHROUGH))
             sample_rate = out->sample_rate * 4;

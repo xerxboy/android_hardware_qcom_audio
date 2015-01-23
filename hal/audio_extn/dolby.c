@@ -385,9 +385,9 @@ int audio_extn_dolby_update_passt_formats(struct audio_device *adev,
     int32_t i = 0, ret = -ENOSYS;
 
     if (platform_is_edid_supported_format(adev->platform, AUDIO_FORMAT_AC3) ||
-        platform_is_edid_supported_format(adev->platform, AUDIO_FORMAT_EAC3)) {
+        platform_is_edid_supported_format(adev->platform, AUDIO_FORMAT_E_AC3)) {
         out->supported_formats[i++] = AUDIO_FORMAT_AC3;
-        out->supported_formats[i++] = AUDIO_FORMAT_EAC3;
+        out->supported_formats[i++] = AUDIO_FORMAT_E_AC3;
         /* Reciever must support JOC and advertise, otherwise JOC is treated as DDP */
         out->supported_formats[i++] = AUDIO_FORMAT_E_AC3_JOC;
         ret = 0;
@@ -401,10 +401,10 @@ bool audio_extn_dolby_is_passt_convert_supported(struct audio_device *adev,
 
     bool convert = false;
     switch (out->format) {
-    case AUDIO_FORMAT_EAC3:
+    case AUDIO_FORMAT_E_AC3:
     case AUDIO_FORMAT_E_AC3_JOC:
         if (!platform_is_edid_supported_format(adev->platform,
-            AUDIO_FORMAT_EAC3)) {
+            AUDIO_FORMAT_E_AC3)) {
             ALOGV("%s:PASSTHROUGH_CONVERT supported", __func__);
             convert = true;
         }
@@ -422,7 +422,7 @@ bool audio_extn_dolby_is_passt_supported(struct audio_device *adev,
                                          struct stream_out *out) {
     bool passt = false;
     switch (out->format) {
-    case AUDIO_FORMAT_EAC3:
+    case AUDIO_FORMAT_E_AC3:
         if (platform_is_edid_supported_format(adev->platform, out->format)) {
             ALOGV("%s:PASSTHROUGH supported for format %x",
                    __func__, out->format);
@@ -432,7 +432,7 @@ bool audio_extn_dolby_is_passt_supported(struct audio_device *adev,
     case AUDIO_FORMAT_AC3:
         if (platform_is_edid_supported_format(adev->platform, AUDIO_FORMAT_AC3)
             || platform_is_edid_supported_format(adev->platform,
-            AUDIO_FORMAT_EAC3)) {
+            AUDIO_FORMAT_E_AC3)) {
             ALOGV("%s:PASSTHROUGH supported for format %x",
                    __func__, out->format);
             passt = true;
@@ -441,7 +441,7 @@ bool audio_extn_dolby_is_passt_supported(struct audio_device *adev,
     case AUDIO_FORMAT_E_AC3_JOC:
          /* Check for DDP capability in edid for JOC contents.*/
          if (platform_is_edid_supported_format(adev->platform,
-             AUDIO_FORMAT_EAC3)) {
+             AUDIO_FORMAT_E_AC3)) {
              ALOGV("%s:PASSTHROUGH supported for format %x",
                    __func__, out->format);
              passt = true;
