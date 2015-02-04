@@ -124,8 +124,8 @@ endif
 
 ifeq ($(strip $(AUDIO_FEATURE_ENABLED_DS2_DOLBY_DAP)),true)
     LOCAL_CFLAGS += -DDS2_DOLBY_DAP_ENABLED
-ifeq ($(strip $(AUDIO_FEATURE_DISABLED_DS1_DOLBY_DDP)),true)
-    ifeq ($(strip $(AUDIO_FEATURE_DISABLED_DS1_DOLBY_DAP)),true)
+ifneq ($(strip $(DOLBY_DDP)),true)
+    ifneq ($(strip $(DOLBY_DAP)),true)
         LOCAL_SRC_FILES += audio_extn/dolby.c
     endif
 endif
