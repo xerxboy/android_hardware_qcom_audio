@@ -369,6 +369,8 @@ typedef enum {
 #define AUDIO_FORMAT_E_AC3_JOC  0x19000000UL
 #endif
 
+int read_line_from_file(const char *path, char *buf, size_t count);
+
 #ifndef KPI_OPTIMIZE_ENABLED
 #define audio_extn_perf_lock_init() (0)
 #define audio_extn_perf_lock_acquire() (0)
