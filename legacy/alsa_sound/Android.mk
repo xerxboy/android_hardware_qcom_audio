@@ -45,11 +45,7 @@ LOCAL_SHARED_LIBRARIES := \
     libpower    \
     libalsa-intf
 
-ifeq ($(TARGET_SIMULATOR),true)
- LOCAL_LDLIBS += -ldl
-else
- LOCAL_SHARED_LIBRARIES += libdl
-endif
+LOCAL_SHARED_LIBRARIES += libdl
 
 LOCAL_C_INCLUDES += $(TARGET_OUT_HEADERS)/mm-audio/audio-alsa
 LOCAL_C_INCLUDES += $(TARGET_OUT_HEADERS)/mm-audio/libalsa-intf
@@ -97,7 +93,6 @@ include $(BUILD_SHARED_LIBRARY)
 
 include $(CLEAR_VARS)
 
-LOCAL_PRELINK_MODULE := false
 
 LOCAL_MODULE_PATH := $(TARGET_OUT_SHARED_LIBRARIES)/hw
 
@@ -128,11 +123,7 @@ LOCAL_SHARED_LIBRARIES := \
     liblog    \
     libalsa-intf
 
-ifeq ($(TARGET_SIMULATOR),true)
- LOCAL_LDLIBS += -ldl
-else
- LOCAL_SHARED_LIBRARIES += libdl
-endif
+LOCAL_SHARED_LIBRARIES += libdl
 
 LOCAL_MODULE:= alsa.msm8960
 LOCAL_MODULE_TAGS := optional
