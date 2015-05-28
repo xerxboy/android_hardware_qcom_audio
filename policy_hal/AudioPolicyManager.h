@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  * Not a contribution.
  *
  * Copyright (C) 2009 The Android Open Source Project
@@ -18,148 +18,119 @@
  */
 
 
-#include <stdint.h>
-#include <sys/types.h>
-#include <utils/Timers.h>
-#include <utils/Errors.h>
-#include <utils/KeyedVector.h>
-#include <hardware_legacy/AudioPolicyManagerBase.h>
+#include <audiopolicy/managerdefault/AudioPolicyManager.h>
+#include <audio_policy_conf.h>
+#include <Volume.h>
 
 
-namespace android_audio_legacy {
+namespace android {
+#ifndef FLAC_OFFLOAD_ENABLED
+#define AUDIO_FORMAT_FLAC 0x1D000000UL
+#endif
 
+#ifndef WMA_OFFLOAD_ENABLED
+#define AUDIO_FORMAT_WMA 0x13000000UL
+#define AUDIO_FORMAT_WMA_PRO 0x14000000UL
+#endif
+
+#ifndef ALAC_OFFLOAD_ENABLED
+#define AUDIO_FORMAT_ALAC 0x1F000000UL
+#endif
+
+#ifndef APE_OFFLOAD_ENABLED
+#define AUDIO_FORMAT_APE 0x20000000UL
+#endif
+
+#ifndef AFE_PROXY_ENABLED
+#define AUDIO_DEVICE_OUT_PROXY 0x1000000
+#endif
 // ----------------------------------------------------------------------------
 
-class AudioPolicyManager: public AudioPolicyManagerBase
+class AudioPolicyManagerCustom: public AudioPolicyManager
 {
 
 public:
-                AudioPolicyManager(AudioPolicyClientInterface *clientInterface)
-                : AudioPolicyManagerBase(clientInterface) {
+                AudioPolicyManagerCustom(AudioPolicyClientInterface *clientInterface)
+                : AudioPolicyManager(clientInterface) {
                     mHdmiAudioDisabled = false;
-                    mHdmiAudioEvent = false; 
-                    mPrimarySuspended = 0; mFastSuspended = 0;
-                    mMultiChannelSuspended = 0;}
+                    mHdmiAudioEvent = false;}
 
-        virtual ~AudioPolicyManager() {}
+        virtual ~AudioPolicyManagerCustom() {}
 
-        virtual status_t setDeviceConnectionState(audio_devices_t device,
-                                                          AudioSystem::device_connection_state state,
-                                                          const char *device_address);
-        virtual void setForceUse(AudioSystem::force_use usage, AudioSystem::forced_config config);
-        virtual audio_io_handle_t getInput(int inputSource,
-                                            uint32_t samplingRate,
-                                            uint32_t format,
-                                            uint32_t channels,
-                                            AudioSystem::audio_in_acoustics acoustics);
-        virtual audio_io_handle_t getOutput(AudioSystem::stream_type stream,
-                                            uint32_t samplingRate = 0,
-                                            uint32_t format = AudioSystem::FORMAT_DEFAULT,
-                                            uint32_t channels = 0,
-                                            AudioSystem::output_flags flags =
-                                                    AudioSystem::OUTPUT_FLAG_INDIRECT,
-                                            const audio_offload_info_t *offloadInfo = NULL);
-        virtual status_t startOutput(audio_io_handle_t output,
-                                             AudioSystem::stream_type stream,
-                                             int session = 0);
-        virtual status_t stopOutput(audio_io_handle_t output,
-                                            AudioSystem::stream_type stream,
-                                            int session = 0 );
-        virtual void releaseOutput(audio_io_handle_t output);
+        status_t setDeviceConnectionStateInt(audio_devices_t device,
+                                          audio_policy_dev_state_t state,
+                                          const char *device_address,
+                                          const char *device_name);
+        virtual void setPhoneState(audio_mode_t state);
+
+
         virtual bool isOffloadSupported(const audio_offload_info_t& offloadInfo);
 
-        virtual void setPhoneState(int state);
-
         // true if given state represents a device in a telephony or VoIP call
-        virtual bool isStateInCall(int state);
+
+        virtual audio_devices_t getDeviceForStrategy(routing_strategy strategy, bool fromCache);
 protected:
-        // return the strategy corresponding to a given stream type
-        static routing_strategy getStrategy(AudioSystem::stream_type stream);
 
-        // return appropriate device for streams handled by the specified strategy according to current
-        // phone state, connected devices...
-        // if fromCache is true, the device is returned from mDeviceForStrategy[],
-        // otherwise it is determine by current state
-        // (device connected,phone state, force use, a2dp output...)
-        // This allows to:
-        //  1 speed up process when the state is stable (when starting or stopping an output)
-        //  2 access to either current device selection (fromCache == true) or
-        // "future" device selection (fromCache == false) when called from a context
-        //  where conditions are changing (setDeviceConnectionState(), setPhoneState()...) AND
-        //  before updateDevicesAndOutputs() is called.
-        virtual audio_devices_t getDeviceForStrategy(routing_strategy strategy,
-                                                     bool fromCache = true);
-        // select input device corresponding to requested audio source
-        virtual audio_devices_t getDeviceForInputSource(int inputSource);
+         status_t checkAndSetVolume(audio_stream_type_t stream,
+                                                   int index,
+                                                   const sp<SwAudioOutputDescriptor>& outputDesc,
+                                                   audio_devices_t device,
+                                                   int delayMs = 0, bool force = false);
 
-        // compute the actual volume for a given stream according to the requested index and a particular
-        // device
-        virtual float computeVolume(int stream, int index, audio_io_handle_t output, audio_devices_t device);
+        // selects the most appropriate device on output for current state
+        // must be called every time a condition that affects the device choice for a given output is
+        // changed: connected device, phone state, force use, output start, output stop..
+        // see getDeviceForStrategy() for the use of fromCache parameter
+        audio_devices_t getNewOutputDevice(const sp<AudioOutputDescriptor>& outputDesc,
+                                           bool fromCache);
+        // returns true if given output is direct output
+        bool isDirectOutput(audio_io_handle_t output);
 
-        // mute/unmute strategies using an incompatible device combination
-        // if muting, wait for the audio in pcm buffer to be drained before proceeding
-        // if unmuting, unmute only after the specified delay
-        // Returns the number of ms waited
-        uint32_t  checkDeviceMuteStrategies(AudioOutputDescriptor *outputDesc,
-                                            audio_devices_t prevDevice,
-                                            uint32_t delayMs);
+        // if argument "device" is different from AUDIO_DEVICE_NONE,  startSource() will force
+        // the re-evaluation of the output device.
+        status_t startSource(sp<SwAudioOutputDescriptor> outputDesc,
+                             audio_stream_type_t stream,
+                             audio_devices_t device,
+                             uint32_t *delayMs);
+         status_t stopSource(sp<SwAudioOutputDescriptor> outputDesc,
+                            audio_stream_type_t stream,
+                            bool forceDeviceUpdate);
+        // event is one of STARTING_OUTPUT, STARTING_BEACON, STOPPING_OUTPUT, STOPPING_BEACON   313
+        // returns 0 if no mute/unmute event happened, the largest latency of the device where   314
+        //   the mute/unmute happened 315
+        uint32_t handleEventForBeacon(int){return 0;}
+        uint32_t setBeaconMute(bool){return 0;}
 
-        // change the route of the specified output. Returns the number of ms we have slept to
-        // allow new routing to take effect in certain cases.
-        uint32_t setOutputDevice(audio_io_handle_t output,
-                                 audio_devices_t device,
-                                 bool force = false,
-                                 int delayMs = 0);
-
-        // check that volume change is permitted, compute and send new volume to audio hardware
-        status_t checkAndSetVolume(int stream, int index, audio_io_handle_t output, audio_devices_t device, int delayMs = 0, bool force = false);
-
-        // close an output and its companion duplicating output.
-        void closeOutput(audio_io_handle_t output);
-
-        // returns the category the device belongs to with regard to volume curve management
-        static device_category getDeviceCategory(audio_devices_t device);
-    private :
-        void handleNotificationRoutingForStream(AudioSystem::stream_type stream);
-#ifdef HDMI_PASSTHROUGH_ENABLED
-        void checkAndSuspendOutputs();
-        void checkAndRestoreOutputs();
-        audio_devices_t handleHDMIPassthrough(audio_devices_t device,
-                         audio_io_handle_t output,
-                         int stream = -1,
-                         int strategy = -1);
-        audio_io_handle_t getPassthroughOutput(
-                                    AudioSystem::stream_type stream,
-                                    uint32_t samplingRate,
-                                    uint32_t format,
-                                    uint32_t channelMask,
-                                    AudioSystem::output_flags flags,
-                                    const audio_offload_info_t *offloadInfo,
-                                    audio_devices_t device);
-        bool isEffectEnabled();
-        void closeOffloadOutputs();
-        void updateAndCloseOutputs();
-        bool isHDMIPassthroughEnabled();
-#endif
-        uint32_t mPrimarySuspended;
-        uint32_t mFastSuspended;
-        uint32_t mMultiChannelSuspended;
-
-        int mOldPhoneState;
-        bool isExternalModem();
-
-        static const char* HDMI_SPKR_STR;
-
-        //parameter indicates of HDMI speakers disabled from the Qualcomm settings
+        // handle special cases for sonification strategy while in call: mute streams or replace by
+        // a special tone in the device used for communication
+        void handleIncallSonification(audio_stream_type_t stream, bool starting, bool stateChange, audio_io_handle_t output);
+        //parameter indicates of HDMI speakers disabled
         bool mHdmiAudioDisabled;
-
         //parameter indicates if HDMI plug in/out detected
         bool mHdmiAudioEvent;
-
 private:
+        static float volIndexToAmpl(audio_devices_t device, const StreamDescriptor& streamDesc,
+                int indexInUi);
+        // updates device caching and output for streams that can influence the
+        //    routing of notifications
+        void handleNotificationRoutingForStream(audio_stream_type_t stream);
+        static bool isVirtualInputDevice(audio_devices_t device);
+        static bool deviceDistinguishesOnAddress(audio_devices_t device);
+        uint32_t nextUniqueId();
+        // internal method to return the output handle for the given device and format
+        audio_io_handle_t getOutputForDevice(
+                audio_devices_t device,
+                audio_session_t session,
+                audio_stream_type_t stream,
+                uint32_t samplingRate,
+                audio_format_t format,
+                audio_channel_mask_t channelMask,
+                audio_output_flags_t flags,
+                const audio_offload_info_t *offloadInfo);
         // Used for voip + voice concurrency usecase
         int mPrevPhoneState;
-        static int mvoice_call_state;
+        int mvoice_call_state;
 
 };
+
 };
