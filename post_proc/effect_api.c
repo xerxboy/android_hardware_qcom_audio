@@ -34,6 +34,7 @@
 #include <cutils/log.h>
 #include <tinyalsa/asoundlib.h>
 #include <sound/audio_effects.h>
+#include <errno.h>
 
 #include "effect_api.h"
 
