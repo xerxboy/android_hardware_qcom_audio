@@ -2188,7 +2188,7 @@ uint32_t platform_get_pcm_offload_buffer_size(audio_offload_info_t* info)
         fragment_size =  atoi(value) * 1024;
         ALOGV("Using buffer size from sys prop %d", fragment_size);
     }
-
+#ifdef USE_SMALL_BUFF
     if(track_offload && info->use_small_bufs &&
           (property_get("audio.offload.track.buffer.size", value, "")) &&
            atoi(value)) {
@@ -2224,6 +2224,7 @@ uint32_t platform_get_pcm_offload_buffer_size(audio_offload_info_t* info)
                             * popcount(info->channel_mask))/1000;
         }
     }
+#endif
 
     fragment_size = ALIGN(fragment_size, 1024);
 

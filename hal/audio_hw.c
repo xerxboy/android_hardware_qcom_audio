@@ -2446,12 +2446,13 @@ static int adev_open_output_stream(struct audio_hw_device *dev,
 
         if (flags & AUDIO_OUTPUT_FLAG_NON_BLOCKING)
             out->non_blocking = 1;
-
+#ifdef USE_SMALL_BUFF
         if (config->offload_info.use_small_bufs) {
             out->non_blocking = 0;
             ALOGI("Keep write blocking for small buff: non_blockling %d",
                   out->non_blocking);
         }
+#endif
 
         out->send_new_metadata = 1;
         out->offload_state = OFFLOAD_STATE_IDLE;
