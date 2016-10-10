@@ -287,6 +287,10 @@ ifeq ($(strip $(AUDIO_FEATURE_ENABLED_BT_HAL)),true)
     LOCAL_SRC_FILES += audio_extn/bt_hal.c
 endif
 
+ifeq ($strip $(AUDIO_FEATURE_ENABLED_PLAYBACK_ULL)), true)
+    LOCAL_CFLAGS += -DAUDIO_FEATURE_PLAYBACK_ULL
+endif
+
 LOCAL_SHARED_LIBRARIES := \
 	liblog \
 	libcutils \

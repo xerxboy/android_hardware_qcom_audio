@@ -4639,10 +4639,15 @@ int adev_open_output_stream(struct audio_hw_device *dev,
         channels = audio_channel_count_from_out_mask(out->channel_mask);
 
         if (out->flags & AUDIO_OUTPUT_FLAG_RAW) {
+#ifdef AUDIO_FEATURE_PLAYBACK_ULL
             out->usecase = USECASE_AUDIO_PLAYBACK_ULL;
             out->realtime = may_use_noirq_mode(adev, USECASE_AUDIO_PLAYBACK_ULL,
                                                out->flags);
             out->config = out->realtime ? pcm_config_rt : pcm_config_low_latency;
+#else
+            out->usecase = USECASE_AUDIO_PLAYBACK_LOW_LATENCY;
+            out->config = pcm_config_low_latency;
+#endif
         } else if (out->flags & AUDIO_OUTPUT_FLAG_FAST) {
             out->usecase = USECASE_AUDIO_PLAYBACK_LOW_LATENCY;
             out->dynamic_pm_qos_enabled = property_get_bool("vendor.audio.dynamic.qos.enable", false);
