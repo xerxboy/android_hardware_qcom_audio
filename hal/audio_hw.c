@@ -76,7 +76,12 @@ static unsigned int configured_low_latency_capture_period_size =
 /* This constant enables extended precision handling.
  * TODO The flag is off until more testing is done.
  */
+
+#ifdef USE_XML_AUDIO_POLICY_CONF
+static const bool k_enable_extended_precision = false;
+#else
 static const bool k_enable_extended_precision = true;
+#endif
 
 struct pcm_config pcm_config_deep_buffer = {
     .channels = 2,
@@ -176,6 +181,8 @@ const char * const use_case_table[AUDIO_USECASE_MAX] = {
     [USECASE_VOLTE_CALL] = "volte-call",
     [USECASE_QCHAT_CALL] = "qchat-call",
     [USECASE_VOWLAN_CALL] = "vowlan-call",
+    [USECASE_VOICEMMODE1_CALL] = "voicemmode1-call",
+    [USECASE_VOICEMMODE2_CALL] = "voicemmode2-call",
     [USECASE_COMPRESS_VOIP_CALL] = "compress-voip-call",
     [USECASE_INCALL_REC_UPLINK] = "incall-rec-uplink",
     [USECASE_INCALL_REC_DOWNLINK] = "incall-rec-downlink",
@@ -1683,7 +1690,11 @@ int start_output_stream(struct stream_out *out)
                 goto error_open;
             }
         }
+        platform_set_stream_channel_map(adev->platform, out->channel_mask,
+                                    out->pcm_device_id);
     } else {
+        platform_set_stream_channel_map(adev->platform, out->channel_mask,
+                                    out->pcm_device_id);
         out->pcm = NULL;
         out->compr = compress_open(adev->snd_card,
                                    out->pcm_device_id,
@@ -2203,7 +2214,7 @@ static ssize_t out_write(struct audio_stream_out *stream, const void *buffer,
         if (out->pcm) {
             if (out->muted)
                 memset((void *)buffer, 0, bytes);
-            ALOGE("%s: writing buffer (%zd bytes) to pcm device", __func__, bytes);
+            ALOGVV("%s: writing buffer (%zd bytes) to pcm device", __func__, bytes);
             if (out->usecase == USECASE_AUDIO_PLAYBACK_AFE_PROXY)
                 ret = pcm_mmap_write(out->pcm, (void *)buffer, bytes);
             else

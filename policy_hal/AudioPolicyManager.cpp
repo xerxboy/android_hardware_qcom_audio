@@ -1086,6 +1086,7 @@ status_t AudioPolicyManagerCustom::stopSource(sp<AudioOutputDescriptor> outputDe
         // store time at which the stream was stopped - see isStreamActive()
         if (outputDesc->mRefCount[stream] == 0 || forceDeviceUpdate) {
             outputDesc->mStopTime[stream] = systemTime();
+            audio_devices_t prevDevice = outputDesc->device();
             audio_devices_t newDevice = getNewOutputDevice(outputDesc, false /*fromCache*/);
             // delay the device switch by twice the latency because stopOutput() is executed when
             // the track stop() command is received and at that time the audio track buffer can
@@ -1104,10 +1105,21 @@ status_t AudioPolicyManagerCustom::stopSource(sp<AudioOutputDescriptor> outputDe
                         outputDesc->sharesHwModuleWith(desc) &&
                         (newDevice != desc->device())) {
                     audio_devices_t dev = getNewOutputDevice(mOutputs.valueFor(curOutput), false /*fromCache*/);
+                    bool force = desc->device() != dev;
+                    uint32_t delayMs;
+                    if (dev == prevDevice) {
+                        delayMs = 0;
+                    } else {
+                        delayMs = outputDesc->latency()*2;
+                    }
                     setOutputDevice(desc,
                                     dev,
-                                    true,
-                                    outputDesc->latency()*2);
+                                    force,
+                                    delayMs);
+                        // re-apply device specific volume if not done by setOutputDevice()
+                        if (!force) {
+                            applyStreamVolumes(desc, newDevice, delayMs);
+                        }
                 }
             }
             // update the outputs if stopping one with a stream that can affect notification routing
@@ -1988,7 +2000,12 @@ status_t AudioPolicyManagerCustom::startInput(audio_io_handle_t input,
                     MIX_STATE_MIXING);
         }
 
-        if (mInputs.activeInputsCount() == 0) {
+        // indicate active capture to sound trigger service if starting capture from a mic on
+        // primary HW module
+        audio_devices_t device = getNewInputDevice(input);
+        audio_devices_t primaryInputDevices = availablePrimaryInputDevices();
+        if (((device & primaryInputDevices & ~AUDIO_DEVICE_BIT_IN) != 0) &&
+                mInputs.activeInputsCountOnDevices(primaryInputDevices) == 0) {
             SoundTrigger::setCaptureState(true);
         }
         setInputDevice(input, getNewInputDevice(input), true /* force */);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2016, The Linux Foundation. All rights reserved.
  * Not a Contribution.
  *
  * Copyright (C) 2013 The Android Open Source Project
@@ -153,6 +153,11 @@ enum {
     SND_DEVICE_IN_SPEAKER_QMIC_AEC,
     SND_DEVICE_IN_SPEAKER_QMIC_NS,
     SND_DEVICE_IN_SPEAKER_QMIC_AEC_NS,
+    SND_DEVICE_IN_UNPROCESSED_MIC,
+    SND_DEVICE_IN_UNPROCESSED_STEREO_MIC,
+    SND_DEVICE_IN_UNPROCESSED_THREE_MIC,
+    SND_DEVICE_IN_UNPROCESSED_QUAD_MIC,
+    SND_DEVICE_IN_UNPROCESSED_HEADSET_MIC,
     SND_DEVICE_IN_END,
 
     SND_DEVICE_MAX = SND_DEVICE_IN_END,
@@ -228,6 +233,8 @@ enum {
 #define QCHAT_CALL_PCM_DEVICE 26
 #define QCHAT_CALL_PCM_DEVICE_OF_EXT_CODEC 28
 #define VOWLAN_CALL_PCM_DEVICE 16
+#define VOICEMMODE1_CALL_PCM_DEVICE 27
+#define VOICEMMODE2_CALL_PCM_DEVICE 28
 
 #define LIB_CSD_CLIENT "libcsd-client.so"
 /* CSD-CLIENT related functions */
