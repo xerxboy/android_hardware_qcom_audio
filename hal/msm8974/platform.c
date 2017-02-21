@@ -923,11 +923,6 @@ static void set_platform_defaults(struct platform_data * my_data)
     backend_tag_table[SND_DEVICE_IN_USB_HEADSET_MIC] = strdup("usb-headset-mic");
     backend_tag_table[SND_DEVICE_IN_CAPTURE_FM] = strdup("capture-fm");
     backend_tag_table[SND_DEVICE_OUT_TRANSMISSION_FM] = strdup("transmission-fm");
-    if (is_external_codec) {
-        my_data->max_mic_count = PLATFORM_DEFAULT_EXTERNAL_CODEC_MIC_COUNT;
-    } else {
-        my_data->max_mic_count = PLATFORM_DEFAULT_MIC_COUNT;
-    }
 
     hw_interface_table[SND_DEVICE_OUT_HANDSET] = strdup("SLIMBUS_0_RX");
     hw_interface_table[SND_DEVICE_OUT_SPEAKER] = strdup("SLIMBUS_0_RX");
@@ -950,6 +945,12 @@ static void set_platform_defaults(struct platform_data * my_data)
     hw_interface_table[SND_DEVICE_OUT_VOICE_TX] = strdup("AFE_PCM_RX");
     hw_interface_table[SND_DEVICE_OUT_SPEAKER_PROTECTED] = strdup("SLIMBUS_0_RX");
     hw_interface_table[SND_DEVICE_OUT_VOICE_SPEAKER_PROTECTED] = strdup("SLIMBUS_0_RX");
+
+    if (is_external_codec) {
+        my_data->max_mic_count = PLATFORM_DEFAULT_EXTERNAL_CODEC_MIC_COUNT;
+    } else {
+        my_data->max_mic_count = PLATFORM_DEFAULT_MIC_COUNT;
+    }
 }
 
 void get_cvd_version(char *cvd_version, struct audio_device *adev)
@@ -1202,8 +1203,8 @@ void *platform_init(struct audio_device *adev)
     my_data->slowtalk = false;
     my_data->hd_voice = false;
     my_data->edid_info = NULL;
-    my_data->camcorder_stereo = false;
     my_data->hw_dep_fd = -1;
+    my_data->camcorder_stereo = false;
 
     property_get("ro.qc.sdk.audio.fluencetype", my_data->fluence_cap, "");
     if (!strncmp("fluencepro", my_data->fluence_cap, sizeof("fluencepro"))) {

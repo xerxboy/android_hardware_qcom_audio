@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2014, 2016 The Linux Foundation. All rights reserved.
  * Not a Contribution.
  *
  * Copyright (C) 2010 The Android Open Source Project
@@ -359,7 +359,7 @@ void audio_extn_ddp_set_parameters(struct audio_device *adev,
 
 #if defined(DS1_DOLBY_DDP_ENABLED) || defined(DS2_DOLBY_DAP_ENABLED)
 int audio_extn_dolby_get_snd_codec_id(struct audio_device *adev,
-                                      struct stream_out *out,
+                                      struct stream_out *out __unused,
                                       audio_format_t format)
 {
     int id = 0;
@@ -367,10 +367,12 @@ int audio_extn_dolby_get_snd_codec_id(struct audio_device *adev,
      * Use wfd /hdmi sink channel cap for dolby params if device is wfd
      * or hdmi. Otherwise use stereo configuration
      */
+#ifdef DS1_DOLBY_DDP_ENABLED
     int channel_cap = out->devices & AUDIO_DEVICE_OUT_AUX_DIGITAL ?
                       adev->cur_hdmi_channels :
                       out->devices & AUDIO_DEVICE_OUT_PROXY ?
                       adev->cur_wfd_channels : 2;
+#endif
 
     switch (format) {
     case AUDIO_FORMAT_AC3:
@@ -652,7 +654,7 @@ int audio_extn_dap_hal_init(int snd_card) {
     ds2extnmod.dap_hal_set_hw_info(SND_CARD, (void*)(&snd_card));
     ALOGV("%s Sound card number is:%d",__func__,snd_card);
 
-    platform_get_device_to_be_id_map((int**)&device_be_id_map.device_id_to_be_id, &device_be_id_map.len);
+    platform_get_device_to_be_id_map((int **)&device_be_id_map.device_id_to_be_id, &device_be_id_map.len);
     ds2extnmod.dap_hal_set_hw_info(DEVICE_BE_ID_MAP, (void*)(&device_be_id_map));
     ALOGV("%s Set be id map len:%d",__func__,device_be_id_map.len);
     ret = 0;
@@ -767,7 +769,9 @@ void audio_extn_dolby_set_license(struct audio_device *adev __unused)
         ds2extnmod.dap_hal_set_hw_info(DMID, (void*)(&dolby_license.dmid));
     } else {
         ALOGV("%s: dap_hal_set_hw_info is NULL", __func__);
+        return;
     }
+    return;
 }
 
 
