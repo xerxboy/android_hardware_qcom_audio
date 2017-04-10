@@ -46,8 +46,8 @@ MM_AUDIO_ENABLED_FTM := true
 MM_AUDIO_ENABLED_SAFX := true
 TARGET_USES_QCOM_MM_AUDIO := true
 AUDIO_FEATURE_ENABLED_HW_ACCELERATED_EFFECTS := false
-#AUDIO_FEATURE_ENABLED_DS2_DOLBY_DAP := true
-#DOLBY_DDP := true
+AUDIO_FEATURE_ENABLED_DS2_DOLBY_DAP := true
+
 AUDIO_FEATURE_ENABLED_SOURCE_TRACKING := true
 AUDIO_FEATURE_ENABLED_AUDIOSPHERE := true
 ##AUDIO_FEATURE_FLAGS
@@ -142,9 +142,9 @@ audio.offload.track.enable=true
 PRODUCT_PROPERTY_OVERRIDES += \
 audio.deep_buffer.media=true
 
-#Default pcm audio sink buffer size in msec. This is used in calculating framecount
+#QC property used when calculating client heap size in audio flinger
 PRODUCT_PROPERTY_OVERRIDES += \
-media.stagefright.audio.sink=280
+audio.heap.size.multiplier=7
 
 #enable voice path for PCM VoIP by default
 PRODUCT_PROPERTY_OVERRIDES += \
