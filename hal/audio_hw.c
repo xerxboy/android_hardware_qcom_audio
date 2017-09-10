@@ -3632,7 +3632,7 @@ static int out_get_render_position(const struct audio_stream_out *stream,
         *dsp_frames = out->written;
         return 0;
     } else
-        return -EINVAL;
+        return -ENODATA;
 }
 
 static int out_add_audio_effect(const struct audio_stream *stream __unused,
@@ -3657,7 +3657,7 @@ static int out_get_presentation_position(const struct audio_stream_out *stream,
                                    uint64_t *frames, struct timespec *timestamp)
 {
     struct stream_out *out = (struct stream_out *)stream;
-    int ret = -1;
+    int ret = -ENODATA;
     unsigned long dsp_frames;
 
     /* below piece of code is not guarded against any lock because audioFliner serializes
@@ -4088,7 +4088,7 @@ static char* in_get_parameters(const struct audio_stream *stream,
 static int in_set_gain(struct audio_stream_in *stream __unused,
                        float gain __unused)
 {
-    return 0;
+    return -ENOSYS;
 }
 
 static ssize_t in_read(struct audio_stream_in *stream, void *buffer,
