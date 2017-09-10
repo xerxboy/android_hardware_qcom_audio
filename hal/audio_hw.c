@@ -4703,7 +4703,7 @@ static int out_get_render_position(const struct audio_stream_out *stream,
         adjust_frames_for_device_delay(out, dsp_frames);
         return 0;
     } else
-        return -EINVAL;
+        return -ENODATA;
 }
 
 static int out_add_audio_effect(const struct audio_stream *stream __unused,
@@ -5357,7 +5357,7 @@ static char* in_get_parameters(const struct audio_stream *stream,
 static int in_set_gain(struct audio_stream_in *stream __unused,
                        float gain __unused)
 {
-    return 0;
+    return -ENOSYS;
 }
 
 static ssize_t in_read(struct audio_stream_in *stream, void *buffer,
