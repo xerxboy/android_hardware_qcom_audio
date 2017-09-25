@@ -170,12 +170,14 @@ const struct string_to_enum s_format_name_to_enum_table[] = {
     STRING_TO_ENUM(AUDIO_FORMAT_AAC_ADTS_LC),
     STRING_TO_ENUM(AUDIO_FORMAT_AAC_ADTS_HE_V1),
     STRING_TO_ENUM(AUDIO_FORMAT_AAC_ADTS_HE_V2),
-    STRING_TO_ENUM(AUDIO_FORMAT_DSD),
     STRING_TO_ENUM(AUDIO_FORMAT_AAC_LATM),
     STRING_TO_ENUM(AUDIO_FORMAT_AAC_LATM_LC),
     STRING_TO_ENUM(AUDIO_FORMAT_AAC_LATM_HE_V1),
     STRING_TO_ENUM(AUDIO_FORMAT_AAC_LATM_HE_V2),
+#ifdef AUDIO_EXTN_MORE_FORMATS_ENABLED
+    STRING_TO_ENUM(AUDIO_FORMAT_DSD),
     STRING_TO_ENUM(AUDIO_FORMAT_APTX),
+#endif
 #endif
 };
 
@@ -1277,12 +1279,14 @@ int get_snd_codec_id(audio_format_t format)
     case AUDIO_FORMAT_IEC61937:
         id = SND_AUDIOCODEC_IEC61937;
         break;
+#ifdef AUDIO_EXTN_MORE_FORMATS_ENABLED
     case AUDIO_FORMAT_DSD:
         id = SND_AUDIOCODEC_DSD;
         break;
     case AUDIO_FORMAT_APTX:
         id = SND_AUDIOCODEC_APTX;
         break;
+#endif
     default:
         ALOGE("%s: Unsupported audio format :%x", __func__, format);
     }

@@ -446,6 +446,7 @@ static void release_in_focus(struct stream_in *in)
         adev->adm_abandon_focus(adev->adm_data, in->capture_handle);
 }
 
+#ifdef SND_MONITOR_ENABLED
 static int parse_snd_card_status(struct str_parms *parms, int *card,
                                  card_status_t *status)
 {
@@ -465,6 +466,7 @@ static int parse_snd_card_status(struct str_parms *parms, int *card,
                                          CARD_STATUS_OFFLINE;
     return 0;
 }
+#endif
 
 __attribute__ ((visibility ("default")))
 bool audio_hw_send_gain_dep_calibration(int level) {
@@ -2754,9 +2756,11 @@ static size_t out_get_buffer_size(const struct audio_stream *stream)
     struct stream_out *out = (struct stream_out *)stream;
 
     if (out->flags & AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD) {
+#ifdef AUDIO_EXTN_MORE_FORMATS_ENABLED
         if (out->flags & AUDIO_OUTPUT_FLAG_TIMESTAMP)
             return out->compr_config.fragment_size - sizeof(struct snd_codec_metadata);
         else
+#endif
             return out->compr_config.fragment_size;
     } else if(out->usecase == USECASE_COMPRESS_VOIP_CALL)
         return voice_extn_compress_voip_out_get_buffer_size(out);
@@ -2954,6 +2958,7 @@ static bool output_drives_call(struct audio_device *adev, struct stream_out *out
     return out == adev->primary_output || out == adev->voice_tx_output;
 }
 
+#ifdef SND_MONITOR_ENABLED
 // note: this call is safe only if the stream_cb is
 // removed first in close_output_stream (as is done now).
 static void out_snd_mon_cb(void * stream, struct str_parms * parms)
@@ -2990,6 +2995,7 @@ static void out_snd_mon_cb(void * stream, struct str_parms * parms)
 
     return;
 }
+#endif
 
 static int out_set_parameters(struct audio_stream *stream, const char *kvpairs)
 {
@@ -4084,6 +4090,7 @@ static int in_dump(const struct audio_stream *stream __unused,
     return 0;
 }
 
+#ifdef SND_MONITOR_ENABLED
 static void in_snd_mon_cb(void * stream, struct str_parms * parms)
 {
     if (!stream || !parms)
@@ -4120,6 +4127,7 @@ static void in_snd_mon_cb(void * stream, struct str_parms * parms)
 
     return;
 }
+#endif
 
 static int in_set_parameters(struct audio_stream *stream, const char *kvpairs)
 {
@@ -4593,9 +4601,11 @@ int adev_open_output_stream(struct audio_hw_device *dev,
         if (!audio_extn_passthru_is_passthrough_stream(out))
             out->bit_width = AUDIO_OUTPUT_BIT_WIDTH;
 
+#ifdef AUDIO_EXTN_MORE_FORMATS_ENABLED        
         if (out->flags & AUDIO_OUTPUT_FLAG_TIMESTAMP)
             out->compr_config.codec->flags |= COMPRESSED_TIMESTAMP_FLAG;
         ALOGVV("%s : out->compr_config.codec->flags -> (%#x) ", __func__, out->compr_config.codec->flags);
+#endif
 
         /*TODO: Do we need to change it for passthrough */
         out->compr_config.codec->format = SND_AUDIOSTREAMFORMAT_RAW;
@@ -4659,9 +4669,11 @@ int adev_open_output_stream(struct audio_hw_device *dev,
             out->compr_config.fragments = COMPRESS_OFFLOAD_NUM_FRAGMENTS;
         }
 
+#ifdef AUDIO_EXTN_MORE_FORMATS_ENABLED
         if (out->flags & AUDIO_OUTPUT_FLAG_TIMESTAMP) {
             out->compr_config.fragment_size += sizeof(struct snd_codec_metadata);
         }
+#endif
         if (config->offload_info.format == AUDIO_FORMAT_FLAC)
             out->compr_config.codec->options.flac_dec.sample_size = AUDIO_OUTPUT_BIT_WIDTH;
 
@@ -4672,15 +4684,18 @@ int adev_open_output_stream(struct audio_hw_device *dev,
         if (flags & AUDIO_OUTPUT_FLAG_NON_BLOCKING)
             out->non_blocking = 1;
 
+#ifdef AUDIO_EXTN_MORE_FORMATS_ENABLED
         if ((flags & AUDIO_OUTPUT_FLAG_TIMESTAMP) &&
             (flags & AUDIO_OUTPUT_FLAG_HW_AV_SYNC)) {
             out->render_mode = RENDER_MODE_AUDIO_STC_MASTER;
         } else if(flags & AUDIO_OUTPUT_FLAG_TIMESTAMP) {
             out->render_mode = RENDER_MODE_AUDIO_MASTER;
         } else {
+#endif
             out->render_mode = RENDER_MODE_AUDIO_NO_TIMESTAMP;
+#ifdef AUDIO_EXTN_MORE_FORMATS_ENABLED
         }
-
+#endif
         memset(&out->channel_map_param, 0,
                 sizeof(struct audio_out_channel_map_param));
 
@@ -5722,6 +5737,7 @@ static int period_size_is_plausible_for_low_latency(int period_size)
     }
 }
 
+#ifdef SND_MONITOR_ENABLED
 static void adev_snd_mon_cb(void *cookie, struct str_parms *parms)
 {
     bool is_snd_card_status = false;
@@ -5755,6 +5771,7 @@ static void adev_snd_mon_cb(void *cookie, struct str_parms *parms)
     pthread_mutex_unlock(&adev->lock);
     return;
 }
+#endif
 
 /* out and adev lock held */
 static int check_a2dp_restore_l(struct audio_device *adev, struct stream_out *out, bool restore)
