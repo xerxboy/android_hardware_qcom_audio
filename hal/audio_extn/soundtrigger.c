@@ -673,8 +673,9 @@ int audio_extn_sound_trigger_init(struct audio_device *adev)
 
     st_dev->adev = adev;
     list_init(&st_dev->st_ses_list);
+#ifdef SND_MONITOR_ENABLED
     audio_extn_snd_mon_register_listener(st_dev, stdev_snd_mon_cb);
-
+#endif
     return 0;
 
 cleanup:
