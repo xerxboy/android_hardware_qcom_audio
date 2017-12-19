@@ -51,6 +51,9 @@ LOCAL_C_INCLUDES := \
         $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr/include \
         $(call include-path-for, audio-effects)
 
+LOCAL_C_INCLUDES += $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr/include
+LOCAL_ADDITIONAL_DEPENDENCIES := $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr
+
 include $(BUILD_SHARED_LIBRARY)
 
 
@@ -111,6 +114,9 @@ LOCAL_C_INCLUDES := \
         $(call include-path-for, audio-route) \
         $(call project-path-for,qcom-audio)/hal/audio_extn \
         external/tinycompress/include
+
+LOCAL_C_INCLUDES += $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr/include
+LOCAL_ADDITIONAL_DEPENDENCIES := $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr
 
 include $(BUILD_SHARED_LIBRARY)
 
