@@ -43,6 +43,7 @@ LOCAL_STATIC_LIBRARIES := \
     libbase
 
 LOCAL_CFLAGS += -Wall -Werror
+LOCAL_CLANG_CFLAGS += -Wno-overloaded-virtual -Wno-unused-variable -Wno-unused-private-field
 
 ifeq ($(strip $(AUDIO_FEATURE_ENABLED_VOICE_CONCURRENCY)),true)
 LOCAL_CFLAGS += -DVOICE_CONCURRENCY
