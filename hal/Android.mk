@@ -154,10 +154,6 @@ ifeq ($(strip $(AUDIO_FEATURE_ENABLED_EXTN_FORMATS)),true)
 LOCAL_CFLAGS += -DAUDIO_EXTN_FORMATS_ENABLED
 endif
 
-ifeq ($(strip $(AUDIO_FEATURE_ENABLED_EXTN_MORE_FORMATS)),true)
-LOCAL_CFLAGS += -DAUDIO_EXTN_MORE_FORMATS_ENABLED
-endif
-
 ifeq ($(strip $(AUDIO_FEATURE_ENABLED_SPKR_PROTECTION)),true)
     LOCAL_CFLAGS += -DSPKR_PROT_ENABLED
     LOCAL_SRC_FILES += audio_extn/spkr_protection.c
@@ -188,11 +184,6 @@ ifeq ($(strip $(DS1_DOLBY_DAP)),true)
 ifneq ($(strip $(DOLBY_DDP)),true)
     LOCAL_SRC_FILES += audio_extn/dolby.c
 endif
-endif
-
-ifeq ($(strip $(AUDIO_FEATURE_ENABLED_FLAC_OFFLOAD)),true)
-    LOCAL_CFLAGS += -DFLAC_OFFLOAD_ENABLED
-    LOCAL_CFLAGS += -DCOMPRESS_METADATA_NEEDED
 endif
 
 ifeq ($(strip $(AUDIO_FEATURE_ENABLED_EXTN_FLAC_DECODER)),true)
@@ -336,7 +327,7 @@ ifeq ($(strip $(BOARD_SUPPORTS_SOUND_TRIGGER_HAL)),true)
     ST_FEATURE_ENABLE := true
 endif
 
-ifeq ($(strip $(BOARD_SUPPORTS_SOUND_TRIGGER)),true)
+ifeq ($(ST_FEATURE_ENABLE), true)
     LOCAL_CFLAGS += -DSOUND_TRIGGER_ENABLED
     LOCAL_CFLAGS += -DSOUND_TRIGGER_PLATFORM_NAME=$(TARGET_BOARD_PLATFORM)
     LOCAL_C_INCLUDES += $(TARGET_OUT_HEADERS)/mm-audio/sound_trigger
