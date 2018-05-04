@@ -44,8 +44,6 @@ LOCAL_MODULE_RELATIVE_PATH := soundfx
 LOCAL_MODULE:= libqcompostprocbundle
 LOCAL_VENDOR_MODULE := true
 
-LOCAL_ADDITIONAL_DEPENDENCIES += $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr
-
 LOCAL_C_INCLUDES := \
         external/tinyalsa/include \
         $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr/include \

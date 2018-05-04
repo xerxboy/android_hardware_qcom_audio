@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2018, The Linux Foundation. All rights reserved.
  * Not a Contribution.
  *
  * Copyright (C) 2013 The Android Open Source Project
@@ -59,6 +59,16 @@
 #include <log_xml_parser.h>
 #define LOG_MASK HAL_MOD_FILE_AUDIO_EXTN
 #include <log_utils.h>
+#endif
+
+#ifndef APTX_DECODER_ENABLED
+#define audio_extn_aptx_dec_set_license(adev) (0)
+#define audio_extn_set_aptx_dec_bt_addr(adev, parms) (0)
+#define audio_extn_parse_aptx_dec_bt_addr(value) (0)
+#else
+static void audio_extn_aptx_dec_set_license(struct audio_device *adev);
+static void audio_extn_set_aptx_dec_bt_addr(struct audio_device *adev, struct str_parms *parms);
+static void audio_extn_parse_aptx_dec_bt_addr(char *value);
 #endif
 
 #define MAX_SLEEP_RETRY 100
@@ -1161,6 +1171,7 @@ int audio_extn_perf_lock_init(void)
                                                        "perf_lock_acq");
             if (perf_lock_acq == NULL) {
                 ALOGE("%s: Perf lock Acquire NULL \n", __func__);
+                dlclose(qcopt_handle);
                 ret = -EINVAL;
                 goto err;
             }
@@ -1168,6 +1179,7 @@ int audio_extn_perf_lock_init(void)
                                                        "perf_lock_rel");
             if (perf_lock_rel == NULL) {
                 ALOGE("%s: Perf lock Release NULL \n", __func__);
+                dlclose(qcopt_handle);
                 ret = -EINVAL;
                 goto err;
             }
@@ -1262,7 +1274,6 @@ int audio_extn_check_and_set_multichannel_usecase(struct audio_device *adev,
 static void audio_extn_aptx_dec_set_license(struct audio_device *adev)
 {
     int ret, key = 0;
-    char value[128] = {0};
     struct mixer_ctl *ctl;
     const char *mixer_ctl_name = "APTX Dec License";
 
@@ -1280,7 +1291,7 @@ static void audio_extn_aptx_dec_set_license(struct audio_device *adev)
         ALOGE("%s: cannot set license, error:%d",__func__, ret);
 }
 
-static void audio_extn_set_aptx_dec_bt_addr(struct audio_device *adev, struct str_parms *parms)
+static void audio_extn_set_aptx_dec_bt_addr(struct audio_device *adev __unused, struct str_parms *parms)
 {
     int ret = 0;
     char value[256];
@@ -1299,6 +1310,7 @@ int audio_extn_set_aptx_dec_params(struct aptx_dec_param *payload)
     aextnmod.addr.nap = aptx_cfg->bt_addr.nap;
     aextnmod.addr.uap = aptx_cfg->bt_addr.uap;
     aextnmod.addr.lap = aptx_cfg->bt_addr.lap;
+    return 0;
 }
 
 static void audio_extn_parse_aptx_dec_bt_addr(char *value)
@@ -1326,11 +1338,8 @@ static void audio_extn_parse_aptx_dec_bt_addr(char *value)
 
 void audio_extn_send_aptx_dec_bt_addr_to_dsp(struct stream_out *out)
 {
-    char mixer_ctl_name[128];
-    struct mixer_ctl *ctl;
-    uint32_t addr[3];
 
-    ALOGV("%s", __func__);
+    ALOGD("%s", __func__);
     out->compr_config.codec->options.aptx_dec.nap = aextnmod.addr.nap;
     out->compr_config.codec->options.aptx_dec.uap = aextnmod.addr.uap;
     out->compr_config.codec->options.aptx_dec.lap = aextnmod.addr.lap;
@@ -1376,6 +1385,14 @@ int audio_extn_out_set_param_data(struct stream_out *out,
         case AUDIO_EXTN_PARAM_OUT_CHANNEL_MAP:
             ret = audio_extn_utils_set_channel_map(out,
                     (struct audio_out_channel_map_param *)(payload));
+            break;
+        case AUDIO_EXTN_PARAM_OUT_MIX_MATRIX_PARAMS:
+            ret = audio_extn_utils_set_pan_scale_params(out,
+                    (struct mix_matrix_params *)(payload));
+            break;
+        case AUDIO_EXTN_PARAM_CH_MIX_MATRIX_PARAMS:
+            ret = audio_extn_utils_set_downmix_params(out,
+                    (struct mix_matrix_params *)(payload));
             break;
         default:
             ALOGE("%s:: unsupported param_id %d", __func__, param_id);
