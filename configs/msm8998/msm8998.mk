@@ -152,6 +152,9 @@ persist.vendor.audio.ras.enabled=false
 PRODUCT_PROPERTY_OVERRIDES += \
 vendor.audio.offload.buffer.size.kb=24
 
+PRODUCT_PROPERTY_OVERRIDES += \
+audio.offload.min.duration.secs=5
+
 #Enable offload audio video playback by default
 PRODUCT_PROPERTY_OVERRIDES += \
 audio.offload.video=true
@@ -180,10 +183,6 @@ vendor.audio.dolby.ds2.hardbypass=false
 #Disable Multiple offload sesison
 PRODUCT_PROPERTY_OVERRIDES += \
 vendor.audio.offload.multiple.enabled=false
-
-#Disable Compress passthrough playback
-PRODUCT_PROPERTY_OVERRIDES += \
-vendor.audio.offload.passthrough=false
 
 #Disable surround sound recording
 PRODUCT_PROPERTY_OVERRIDES += \
