@@ -191,6 +191,7 @@ struct qap_module {
     qap_stream_state stream_state[MAX_QAP_MODULE_IN];
     bool is_session_closing;
     bool is_session_output_active;
+    unsigned long long qap_output_bytes_written[MAX_QAP_MODULE_OUT];
     pthread_cond_t session_output_cond;
     pthread_mutex_t session_output_lock;
 
@@ -468,6 +469,61 @@ static void close_all_hdmi_output_l()
     p_qap->passthrough_enabled = 0;
 
     close_all_pcm_hdmi_output_l();
+}
+
+#define DSD_VOLUME_MIN_DB (-96)
+static float AmpToDb(float amplification)
+{
+     float db = DSD_VOLUME_MIN_DB;
+     if (amplification > 0) {
+         db = 20 * log10(amplification);
+         if(db < DSD_VOLUME_MIN_DB)
+             return DSD_VOLUME_MIN_DB;
+     }
+     return db;
+}
+
+/*
+* get the MS12 o/p stream and update the volume
+*/
+static int qap_set_stream_volume(struct audio_stream_out *stream, float left, float right)
+{
+    int ret = 0;
+    struct stream_out *out = (struct stream_out *)stream;
+    struct qap_module *qap_mod = get_qap_module_for_input_stream_l(out);
+    int32_t cmd_data[4] = {0};
+
+    DEBUG_MSG("Left %f, Right %f", left, right);
+
+    if (is_offload_usecase(out->usecase))
+        cmd_data[0] = MS12_SESSION_CFG_SYSSOUND_MIXING_GAIN_INPUT1;
+    else if ((out->usecase == USECASE_AUDIO_PLAYBACK_LOW_LATENCY) ||
+             (out->usecase == USECASE_AUDIO_PLAYBACK_DEEP_BUFFER)) {
+              DEBUG_MSG("Request for volume set for %s usecase not supported",
+(                      out->usecase == USECASE_AUDIO_PLAYBACK_LOW_LATENCY) ? "low_latency":"deepbuffer");
+              return -ENOSYS;
+    }
+
+    /*take left as default level and MS12 doenst support left and right seperately*/
+    cmd_data[1] = AmpToDb(left);
+    cmd_data[2] = 0;/* apply gain instantly*/
+    cmd_data[3] = 0;/* apply gain linearly*/
+
+    if (qap_mod->session_handle != NULL) {
+        ret = qap_session_cmd(qap_mod->session_handle,
+                QAP_SESSION_CMD_SET_PARAM,
+                sizeof(cmd_data),
+                &cmd_data[0],
+                NULL,
+                NULL);
+        if (ret != QAP_STATUS_OK) {
+            ERROR_MSG("vol set failed");
+        }
+    } else
+        DEBUG_MSG("qap module is not yet opened!!, vol cannot be applied");
+
+    DEBUG_MSG("Exit");
+    return ret;
 }
 
 static int qap_out_callback(stream_callback_event_t event, void *param __unused, void *cookie)
@@ -765,8 +821,8 @@ static int qap_out_standby(struct audio_stream *stream)
           stream, out->usecase, use_case_table[out->usecase]);
 
     lock_output_stream_l(out);
-    DEBUG_MSG("Total bytes consumed %llu[frames] by stream (%p) to MM Module",
-              (unsigned long long)out->written, stream);
+    DEBUG_MSG("Total bytes consumed %llu[frames] for usecase %s stream (%p) by MM Module",
+              (unsigned long long)out->written, use_case_table[out->usecase], stream);
 
     //If QAP passthrough is active then block standby on all the input streams of QAP mm modules.
     if (p_qap->passthrough_out) {
@@ -809,34 +865,6 @@ static int qap_out_standby(struct audio_stream *stream)
 
     unlock_output_stream_l(out);
     return status;
-}
-
-/* Sets the volume to PCM output stream. */
-static int qap_out_set_volume(struct audio_stream_out *stream, float left, float right)
-{
-    int ret = 0;
-    struct stream_out *out = (struct stream_out *)stream;
-    struct qap_module *qap_mod = NULL;
-
-    DEBUG_MSG("Left %f, Right %f", left, right);
-
-    qap_mod = get_qap_module_for_input_stream_l(out);
-    if (!qap_mod) {
-        return -EINVAL;
-    }
-
-    pthread_mutex_lock(&p_qap->lock);
-    qap_mod->vol_left = left;
-    qap_mod->vol_right = right;
-    qap_mod->is_vol_set = true;
-    pthread_mutex_unlock(&p_qap->lock);
-
-    if (qap_mod->stream_out[QAP_OUT_OFFLOAD] != NULL) {
-        ret = qap_mod->stream_out[QAP_OUT_OFFLOAD]->stream.set_volume(
-                (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_OFFLOAD], left, right);
-    }
-
-    return ret;
 }
 
 /* Starts a QAP module stream. */
@@ -921,7 +949,8 @@ static int qap_module_write_input_buffer(struct stream_out *out, const void *buf
     buff.common_params.data = (void *) buffer;
     buff.common_params.timestamp = QAP_BUFFER_NO_TSTAMP;
     buff.buffer_parms.input_buf_params.flags = QAP_BUFFER_NO_TSTAMP;
-    DEBUG_MSG("calling module process with bytes %d %p", bytes, buffer);
+    DEBUG_MSG_VV("calling module process for usecase %s stream %p with bytes %d %p",
+                 use_case_table[out->usecase], out, bytes, buffer);
     ret  = qap_module_process(out->qap_stream_handle, &buff);
 
     if(ret > 0) set_stream_state_l(out, RUN);
@@ -981,7 +1010,8 @@ static ssize_t qap_out_write(struct audio_stream_out *stream, const void *buffer
     }
 
     ret = qap_module_write_input_buffer(out, buffer, bytes);
-    DEBUG_MSG("Bytes consumed [%d] by MM Module", (int)ret);
+    DEBUG_MSG_VV("Bytes consumed [%d] by MM Module for usecase %s stream %p",
+                 (int)ret, use_case_table[out->usecase], out);
 
     if (ret >= 0) {
         out->written += ret / ((popcount(out->channel_mask) * sizeof(short)));
@@ -1387,14 +1417,17 @@ void static qap_close_all_output_streams(struct qap_module *qap_mod)
         stream_out = qap_mod->stream_out[i];
         if (stream_out != NULL) {
             adev_close_output_stream((struct audio_hw_device *)p_qap->adev, (struct audio_stream_out *)stream_out);
-            DEBUG_MSG("Closed outputenum=%d session 0x%x %s",
-                    i, (int)stream_out, use_case_table[stream_out->usecase]);
+            DEBUG_MSG("Closed outputenum=%d session 0x%x %s, with total bytes of %llu consumed by hal",
+                    i, (int)stream_out, use_case_table[stream_out->usecase],
+                    qap_mod->qap_output_bytes_written[i]);
             qap_mod->stream_out[i] = NULL;
+            qap_mod->qap_output_bytes_written[i] = 0;
         }
         memset(&qap_mod->session_outputs_config.output_config[i], 0, sizeof(qap_session_outputs_config_t));
         qap_mod->is_media_fmt_changed[i] = false;
     }
     p_qap->passthrough_enabled = false;
+
     DEBUG_MSG("exit");
 }
 
@@ -1686,6 +1719,8 @@ static void qap_session_callback(qap_session_handle_t session_handle __unused,
                             (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH],
                             data_buffer_p,
                             buffer_size);
+                    if (ret > 0)
+                       qap_mod->qap_output_bytes_written[QAP_OUT_TRANSCODE_PASSTHROUGH] += ret;
                 }
             }
             else if ((device & AUDIO_DEVICE_OUT_AUX_DIGITAL)
@@ -1809,6 +1844,8 @@ static void qap_session_callback(qap_session_handle_t session_handle __unused,
                             (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH],
                             data_buffer_p,
                             buffer_size);
+                    if (ret > 0)
+                       qap_mod->qap_output_bytes_written[QAP_OUT_OFFLOAD_MCH] += ret;
                 }
             }
             else {
@@ -1934,6 +1971,9 @@ static void qap_session_callback(qap_session_handle_t session_handle __unused,
                             (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_OFFLOAD],
                             data_buffer_p,
                             buffer_size);
+                    if (ret > 0)
+                       qap_mod->qap_output_bytes_written[QAP_OUT_OFFLOAD] += ret;
+
                 }
             }
             DEBUG_MSG("Bytes consumed [%d] by Audio HAL", ret);
@@ -2930,7 +2970,7 @@ int audio_extn_qap_open_output_stream(struct audio_hw_device *dev,
     }
 
     /* Override function pointers based on qap definitions */
-    out->stream.set_volume = qap_out_set_volume;
+    out->stream.set_volume = qap_set_stream_volume;
     out->stream.pause = qap_out_pause;
     out->stream.resume = qap_out_resume;
     out->stream.drain = qap_out_drain;
