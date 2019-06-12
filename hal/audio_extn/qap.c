@@ -28,15 +28,16 @@
  */
 
 #define LOG_TAG "audio_hw_qap"
-#define LOG_NDEBUG 0
-#define VERY_VERY_VERBOSE_LOGGING
+//#define LOG_NDEBUG 0
+#define LOG_NDDEBUG 0
+//#define VERY_VERY_VERBOSE_LOGGING
 #ifdef VERY_VERY_VERBOSE_LOGGING
 #define DEBUG_MSG_VV DEBUG_MSG
 #else
 #define DEBUG_MSG_VV(a...) do { } while(0)
 #endif
 
-#define DEBUG_MSG(arg,...) ALOGE("%s: %d:  " arg, __func__, __LINE__, ##__VA_ARGS__)
+#define DEBUG_MSG(arg,...) ALOGD("%s: %d:  " arg, __func__, __LINE__, ##__VA_ARGS__)
 #define ERROR_MSG(arg,...) ALOGE("%s: %d:  " arg, __func__, __LINE__, ##__VA_ARGS__)
 
 #define COMPRESS_OFFLOAD_NUM_FRAGMENTS 2
@@ -747,10 +748,12 @@ static int qap_out_standby(struct audio_stream *stream)
     int status = 0;
     int i;
 
-    ALOGD("%s: enter: stream (%p) usecase(%d: %s)", __func__,
+    DEBUG_MSG("enter: stream (%p) usecase(%d: %s)",
           stream, out->usecase, use_case_table[out->usecase]);
 
     lock_output_stream_l(out);
+    DEBUG_MSG("Total bytes consumed %llu[frames] by stream (%p) to MM Module",
+              (unsigned long long)out->written, stream);
 
     //If QAP passthrough is active then block standby on all the input streams of QAP mm modules.
     if (p_qap->passthrough_out) {
@@ -1358,6 +1361,7 @@ void static qap_close_all_output_streams(struct qap_module *qap_mod)
         memset(&qap_mod->session_outputs_config.output_config[i], 0, sizeof(qap_session_outputs_config_t));
         qap_mod->is_media_fmt_changed[i] = false;
     }
+    p_qap->passthrough_enabled = false;
     DEBUG_MSG("exit");
 }
 
@@ -2658,13 +2662,6 @@ static int qap_out_set_parameters(struct audio_stream *stream, const char *kvpai
                         (struct audio_stream *)p_qap->passthrough_out, kvpairs);
             }
         }
-    } else {
-        //Send the routing information to mm module pcm output.
-        if (qap_mod->stream_out[QAP_OUT_OFFLOAD]) {
-            ret = qap_mod->stream_out[QAP_OUT_OFFLOAD]->stream.common.set_parameters(
-                    (struct audio_stream *)qap_mod->stream_out[QAP_OUT_OFFLOAD], kvpairs);
-        }
-        //else: device info is updated in the input streams.
     }
     str_parms_destroy(parms);
 
