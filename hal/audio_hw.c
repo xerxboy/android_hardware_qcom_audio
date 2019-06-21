@@ -6122,8 +6122,7 @@ int adev_open_output_stream(struct audio_hw_device *dev,
         (property_get_bool("vendor.audio.matrix.limiter.enable", false)))
         platform_set_device_params(out, DEVICE_PARAM_LIMITER_ID, 1);
 
-    if (audio_is_linear_pcm(out->format) &&
-        out->flags == AUDIO_OUTPUT_FLAG_NONE && direct_dev) {
+    if (audio_is_linear_pcm(out->format) && direct_dev) {
        pthread_mutex_lock(&adev->lock);
        if (is_hdmi) {
            ALOGV("AUDIO_DEVICE_OUT_AUX_DIGITAL and DIRECT|OFFLOAD, check hdmi caps");
@@ -6217,6 +6216,14 @@ int adev_open_output_stream(struct audio_hw_device *dev,
         if (config->offload_info.sample_rate == 0)
             config->offload_info.sample_rate = config->sample_rate;
 
+        if (out->devices & AUDIO_DEVICE_OUT_AUX_DIGITAL) {
+            if (config->offload_info.format == 0)
+                config->offload_info.format = out->supported_formats[0];
+            if (config->offload_info.sample_rate == 0)
+                config->offload_info.sample_rate = out->supported_sample_rates[0];
+            if (config->offload_info.channel_mask == 0)
+                config->offload_info.channel_mask = out->supported_channel_masks[0];
+        }
         if (!is_supported_format(config->offload_info.format) &&
                 !audio_extn_passthru_is_supported_format(config->offload_info.format)) {
             ALOGE("%s: Unsupported audio format %x " , __func__, config->offload_info.format);
