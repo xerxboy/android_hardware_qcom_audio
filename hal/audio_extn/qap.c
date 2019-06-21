@@ -134,6 +134,9 @@
 FILE *fp_output_writer_hdmi = NULL;
 #endif
 
+qap_output_delay_t main_delay_event_data = {0};
+bool delay_event_fired = false;
+
 //Types of MM module, currently supported by QAP.
 typedef enum {
     MS12,
@@ -1118,16 +1121,12 @@ static int get_buffer_latency(struct stream_out *out, uint32_t buffer_size, uint
 static int qap_get_rendered_frames(struct stream_out *out, uint64_t *frames)
 {
     int ret = 0, i;
-    struct str_parms *parms;
-//    int value = 0;
+    unsigned long long position = 0;
     int module_latency = 0;
     uint32_t kernel_latency = 0;
     uint32_t dsp_latency = 0;
-    int signed_frames = 0;
-    char* kvpairs = NULL;
+    uint64_t signed_frames = 0;
     struct qap_module *qap_mod = NULL;
-
-//    DEBUG_MSG("Output Format %d", out->format);
 
     qap_mod = get_qap_module_for_input_stream_l(out);
     if (!qap_mod || !qap_mod->session_handle|| !out->qap_stream_handle) {
@@ -1136,21 +1135,14 @@ static int qap_get_rendered_frames(struct stream_out *out, uint64_t *frames)
         return -EINVAL;
     }
 
-    //Get MM module latency.
-/* Tobeported
-    kvpairs = qap_mod->qap_audio_stream_get_param(out->qap_stream_handle, "get_latency");
-*/
-    if (kvpairs) {
-        parms = str_parms_create_str(kvpairs);
-        ret = str_parms_get_int(parms, "get_latency", &module_latency);
-        if (ret >= 0) {
-            str_parms_destroy(parms);
-            parms = NULL;
-        }
-        free(kvpairs);
-        kvpairs = NULL;
-    }
-
+    if (delay_event_fired == true) {
+        module_latency += main_delay_event_data.algo_delay;
+        module_latency += main_delay_event_data.buffering_delay;
+//      module_latency += main_delay_event_data.non_main_data_length;
+//      module_latency += main_delay_event_data.non_main_data_offset;
+        // MS12 gives latency in terms of samples convert them to time domain
+        module_latency = (module_latency*1000)/48000;
+     }
     //Get kernel Latency
     for (i = MAX_QAP_MODULE_OUT - 1; i >= 0; i--) {
         if (qap_mod->stream_out[i] == NULL) {
@@ -1197,6 +1189,9 @@ static int qap_get_rendered_frames(struct stream_out *out, uint64_t *frames)
         out->platform_latency = (uint32_t)module_latency + kernel_latency + dsp_latency;
     }
 
+    DEBUG_MSG_VV("total platform latency %d msec MS12(%d)+kernel_latency(%d)+dsp_latency(%d)",
+        out->platform_latency, module_latency, kernel_latency, dsp_latency);
+
     if (out->format & AUDIO_FORMAT_PCM_16_BIT) {
         *frames = 0;
         signed_frames = out->written - out->platform_latency;
@@ -1204,29 +1199,25 @@ static int qap_get_rendered_frames(struct stream_out *out, uint64_t *frames)
         if (signed_frames >= 0) {
             *frames = signed_frames;
         }
-/* Tobeported
-        }
-        else {
-
-        kvpairs = qap_mod->qap_audio_stream_get_param(out->qap_stream_handle, "position");
-    if (kvpairs) {
-        parms = str_parms_create_str(kvpairs);
-        ret = str_parms_get_int(parms, "position", &value);
+    } else {
+        uint32_t param_id = MS12_STREAM_GET_POSITION;
+        ret = qap_module_cmd(out->qap_stream_handle,
+                                    QAP_MODULE_CMD_GET_PARAM,
+                                    sizeof(param_id),
+                                    &param_id,
+                                    NULL,
+                                    &position);
+        DEBUG_MSG_VV("Frames returned by MS12(%d)", position);
         if (ret >= 0) {
-            *frames = value;
-            signed_frames = value - out->platform_latency;
+            *frames = position;
+            signed_frames = position - out->platform_latency;
             // It would be unusual for this value to be negative, but check just in case ...
             if (signed_frames >= 0) {
                 *frames = signed_frames;
             }
-        }
-        str_parms_destroy(parms);
+        } else 
+            ret = -EINVAL;
     }
-*/
-    } else {
-        ret = -EINVAL;
-    }
-
     return ret;
 }
 
@@ -1237,12 +1228,11 @@ static int qap_out_get_render_position(const struct audio_stream_out *stream,
     int ret = 0;
     uint64_t frames=0;
     struct qap_module* qap_mod = NULL;
-    ALOGV("%s, Output Stream %p,dsp frames %d",__func__, stream, (int)dsp_frames);
 
     qap_mod = get_qap_module_for_input_stream_l(out);
     if (!qap_mod) {
         ret = out->stream.get_render_position(stream, dsp_frames);
-        ALOGV("%s, non qap_MOD DSP FRAMES %d",__func__, (int)dsp_frames);
+        DEBUG_MSG("non qap_MOD DSP FRAMES %d", (int)dsp_frames);
         return ret;
     }
 
@@ -1250,13 +1240,14 @@ static int qap_out_get_render_position(const struct audio_stream_out *stream,
         pthread_mutex_lock(&p_qap->lock);
         ret = p_qap->passthrough_out->stream.get_render_position((struct audio_stream_out *)p_qap->passthrough_out, dsp_frames);
         pthread_mutex_unlock(&p_qap->lock);
-        ALOGV("%s, PASS THROUGH DSP FRAMES %p",__func__, dsp_frames);
+        DEBUG_MSG("PASS THROUGH DSP FRAMES %p", dsp_frames);
         return ret;
         }
     frames=*dsp_frames;
     ret = qap_get_rendered_frames(out, &frames);
     *dsp_frames = (uint32_t)frames;
-    ALOGV("%s, DSP FRAMES %d",__func__, (int)dsp_frames);
+    DEBUG_MSG_VV("DSP FRAMES %ud for out(%p)", *dsp_frames, out);
+
     return ret;
 }
 
@@ -1267,7 +1258,6 @@ static int qap_out_get_presentation_position(const struct audio_stream_out *stre
     struct stream_out *out = (struct stream_out *)stream;
     int ret = 0;
 
-//    DEBUG_MSG_VV("Output Stream %p", stream);
 
     //If QAP passthorugh output stream is active.
     if (p_qap->passthrough_out) {
@@ -1289,6 +1279,8 @@ static int qap_out_get_presentation_position(const struct audio_stream_out *stre
 
     ret = qap_get_rendered_frames(out, frames);
     clock_gettime(CLOCK_MONOTONIC, timestamp);
+
+    DEBUG_MSG_VV("frames(%llu) for out(%p)", (unsigned long long)*frames, out);
 
     return ret;
 }
@@ -1426,6 +1418,7 @@ void static qap_close_all_output_streams(struct qap_module *qap_mod)
         }
         memset(&qap_mod->session_outputs_config.output_config[i], 0, sizeof(qap_session_outputs_config_t));
         qap_mod->is_media_fmt_changed[i] = false;
+        delay_event_fired = false;
     }
     p_qap->passthrough_enabled = false;
 
@@ -1541,7 +1534,7 @@ static void qap_session_callback(qap_session_handle_t session_handle __unused,
         abs_index++;
         cb_array_index =abs_index%no_of_outputs;
 
-        DEBUG_MSG("Received QAP_CALLBACK_EVENT_DATA event buff size(%d) for outputid=0x%x",
+        DEBUG_MSG_VV("Received QAP_CALLBACK_EVENT_DATA event buff size(%d) for outputid=0x%x",
             buffer_size, buffer->buffer_parms.output_buf_params.output_id);
 
         cb_data_array[abs_index-1].buff_size = buffer->common_params.size;
@@ -1550,11 +1543,11 @@ static void qap_session_callback(qap_session_handle_t session_handle __unused,
 
 
         if(cb_array_index == 0) {
-            DEBUG_MSG("callback (%d) recieved out of (%d) data cached at %p", abs_index, no_of_outputs, cb_data_array[abs_index-1].buff_ptr);
-            DEBUG_MSG("all callbacks recieved process them in loop");
+            DEBUG_MSG_VV("callback (%d) recieved out of (%d) data cached at %p", abs_index, no_of_outputs, cb_data_array[abs_index-1].buff_ptr);
+            DEBUG_MSG_VV("all callbacks recieved process them in loop");
             abs_index = 0;
         } else {
-            DEBUG_MSG("callback (%d) recieved out of (%d) data cached at (%p) ", cb_array_index, no_of_outputs, cb_data_array[abs_index-1].buff_ptr);
+            DEBUG_MSG_VV("callback (%d) recieved out of (%d)", cb_array_index, no_of_outputs);
             pthread_mutex_unlock(&p_qap->lock);
             return;
         }
@@ -1564,7 +1557,7 @@ static void qap_session_callback(qap_session_handle_t session_handle __unused,
             buffer_size = cb_data_array[i].buff_size ;
             device = cb_data_array[i].dev_id;
 
-            DEBUG_MSG("callback (%d) buffer_size (%d) data_buffer_p(%p) device 0x%x",i, buffer_size, data_buffer_p, device);
+            DEBUG_MSG_VV("callback (%d) buffer_size (%d) data_buffer_p(%p) device 0x%x",i, buffer_size, data_buffer_p, device);
 
             if(device == AUDIO_DEVICE_OUT_PROXY) {
                 if(proxy_out_ptr) {
@@ -1979,7 +1972,7 @@ static void qap_session_callback(qap_session_handle_t session_handle __unused,
 
                 }
             }
-            DEBUG_MSG("Bytes consumed [%d] by Audio HAL", ret);
+            DEBUG_MSG_VV("Bytes consumed [%d] by Audio HAL", ret);
         }
     }
     else if (event_id == QAP_CALLBACK_EVENT_EOS
@@ -2044,6 +2037,21 @@ static void qap_session_callback(qap_session_handle_t session_handle __unused,
             set_stream_state_l(out, STOPPED);
             unlock_output_stream_l(out);
             DEBUG_MSG("sent DRAIN_READY");
+        }
+    } else if (QAP_CALLBACK_EVENT_DELAY == event_id) {
+        audio_qaf_delay_t *qaf_delay = (audio_qaf_delay_t*) buffer;
+        main_delay_event_data.algo_delay = qaf_delay->algo_delay;
+        main_delay_event_data.buffering_delay = qaf_delay->buffering_delay;
+        main_delay_event_data.non_main_data_length = qaf_delay->non_main_data_length;
+        main_delay_event_data.non_main_data_offset = qaf_delay->non_main_data_offset;
+        if (delay_event_fired == false) {
+            delay_event_fired = true;
+            DEBUG_MSG("QAP_CALLBACK_EVENT_DELAY active");
+            DEBUG_MSG("MS12 Latency/Delay event data alog delay %d, buffering delay %d non_main_data_lenght %d non_main_data_offset %d",
+                main_delay_event_data.algo_delay,
+                main_delay_event_data.buffering_delay,
+                main_delay_event_data.non_main_data_length,
+                main_delay_event_data.non_main_data_offset);
         }
     }
 
@@ -2601,9 +2609,9 @@ void qap_module_callback(__unused qap_module_handle_t module_handle,
 {
     struct stream_out *out=(struct stream_out *)priv_data;
 
-    DEBUG_MSG("Entry");
+    DEBUG_MSG_VV("Entry");
     if (QAP_MODULE_CALLBACK_EVENT_SEND_INPUT_BUFFER == event_id) {
-        DEBUG_MSG("QAP_MODULE_CALLBACK_EVENT_SEND_INPUT_BUFFER for (%p)", out);
+        DEBUG_MSG_VV("QAP_MODULE_CALLBACK_EVENT_SEND_INPUT_BUFFER for (%p)", out);
         if (out->client_callback) {
             out->client_callback(STREAM_CBK_EVENT_WRITE_READY, NULL, out->client_cookie);
         }
@@ -2614,7 +2622,7 @@ void qap_module_callback(__unused qap_module_handle_t module_handle,
     else
         DEBUG_MSG("Un Recognized event %d", event_id);
 
-    DEBUG_MSG("exit");
+    DEBUG_MSG_VV("exit");
     return;
 }
 
