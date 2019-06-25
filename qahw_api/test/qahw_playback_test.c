@@ -955,6 +955,11 @@ void *start_stream_playback (void* stream_data)
         drift_params.thread_exit = true;
         pthread_join(drift_query_thread, NULL);
     }
+
+    if (ec_ref) {
+        qahw_set_parameters(stream_param->qahw_out_hal_handle, "ecref=0");
+    }
+
     rc = qahw_out_standby(params->out_handle);
     if (rc) {
         fprintf(log_file, "stream %d: out standby failed %d \n", params->stream_index, rc);
@@ -2692,6 +2697,10 @@ int main(int argc, char* argv[]) {
       }
 #endif
 //END OF TRUMPET TEST
+
+        if (ec_ref) {
+            qahw_set_parameters(stream_param->qahw_out_hal_handle, "ecref=1");
+        }
 
         rc = pthread_create(&playback_thread[i], NULL, start_stream_playback, (void *)&stream_param[i]);
         if (rc) {
