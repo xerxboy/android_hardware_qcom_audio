@@ -204,6 +204,7 @@ struct qap {
 
     bool bt_connect;
     bool hdmi_connect;
+    char ms12_out_format[4];
     int hdmi_sink_channels;
 
     //Flag to indicate if QAP transcode output stream is enabled from any mm module.
@@ -1494,6 +1495,8 @@ static void qap_session_callback(qap_session_handle_t session_handle __unused,
 
     if (event_id == QAP_CALLBACK_EVENT_OUTPUT_CFG_CHANGE) {
         new_conf = &buffer->buffer_parms.output_buf_params.output_config;
+        /* Assign QAP device id since new conf has ms12 deviceid */
+        new_conf->id = buffer->buffer_parms.output_buf_params.output_id;
         qap_output_config_t *cached_conf = NULL;
         int index = -1;
 
@@ -2187,7 +2190,7 @@ static int qap_set_hdmi_configuration_to_module()
     int channels = 0;
     char prop_value[PROPERTY_VALUE_MAX] = {0};
     bool passth_support = false;
-    qap_session_outputs_config_t *session_outputs_config = NULL;
+    qap_session_outputs_config_t session_outputs_config = {0};
 
 
     DEBUG_MSG("Entry");
@@ -2202,16 +2205,12 @@ static int qap_set_hdmi_configuration_to_module()
 
     p_qap->hdmi_sink_channels = 0;
 
-    if (p_qap->qap_mod[MS12].session_handle)
-        session_outputs_config = &p_qap->qap_mod[MS12].session_outputs_config;
-    else if (p_qap->qap_mod[DTS_M8].session_handle)
-        session_outputs_config = &p_qap->qap_mod[DTS_M8].session_outputs_config;
-    else {
+    if (!p_qap->qap_mod[MS12].session_handle && !p_qap->qap_mod[DTS_M8].session_handle) {
         DEBUG_MSG("HDMI connection comes even before session is setup");
         return -EINVAL;
     }
 
-    session_outputs_config->num_output = no_of_outputs = 1;
+    session_outputs_config.num_output = no_of_outputs = 1;
     //QAP re-encoding and DSP offload passthrough is supported.
     if (property_get_bool("vendor.audio.offload.passthrough", false)
             && property_get_bool("vendor.audio.qap.reencode", false)) {
@@ -2219,24 +2218,28 @@ static int qap_set_hdmi_configuration_to_module()
         if (p_qap->qap_mod[MS12].session_handle) {
 
             bool do_setparam = false;
-            property_get("vendor.audio.qap.hdmi.out", prop_value, NULL);
+            if (p_qap->ms12_out_format[0] == '\0') {
+                property_get("vendor.audio.qap.hdmi.out", prop_value, NULL);
+                memcpy(p_qap->ms12_out_format, prop_value, sizeof(p_qap->ms12_out_format) - 1);
+            }
 
             if (platform_is_edid_supported_format(p_qap->adev->platform, AUDIO_FORMAT_E_AC3)
-                    && (strncmp(prop_value, "ddp", 3) == 0)) {
+                    && (strncmp(p_qap->ms12_out_format, "ddp", 3) == 0)) {
                 do_setparam = true;
-                session_outputs_config->output_config[0].format = QAP_AUDIO_FORMAT_EAC3;
-                session_outputs_config->output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_EAC3;
+                session_outputs_config.output_config[0].format = QAP_AUDIO_FORMAT_EAC3;
+                session_outputs_config.output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_EAC3;
             } else if (platform_is_edid_supported_format(p_qap->adev->platform, AUDIO_FORMAT_AC3)) {
                 do_setparam = true;
-                session_outputs_config->output_config[0].format = QAP_AUDIO_FORMAT_AC3;
-                session_outputs_config->output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_AC3;
+                session_outputs_config.output_config[0].format = QAP_AUDIO_FORMAT_AC3;
+                session_outputs_config.output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_AC3;
+                memcpy(p_qap->ms12_out_format, "dd", sizeof(p_qap->ms12_out_format) - 1);
             }
             if (do_setparam) {
                 DEBUG_MSG(" Enabling HDMI(Passthrough out) from MS12 wrapper outputid=0x%x",
-                    session_outputs_config->output_config[0].id);
+                    session_outputs_config.output_config[0].id);
 
                 ret = qap_session_cmd_l(p_qap->qap_mod[MS12].session_handle,
-                                        session_outputs_config);
+                                        &session_outputs_config);
                 if (QAP_STATUS_OK != ret) {
                     ERROR_MSG("Unable to register AUDIO_DEVICE_OUT_HDMI device with QAP %d", ret);
                     return ret;
@@ -2250,13 +2253,13 @@ static int qap_set_hdmi_configuration_to_module()
             bool do_setparam = false;
             if (platform_is_edid_supported_format(p_qap->adev->platform, AUDIO_FORMAT_DTS)) {
                 do_setparam = true;
-                session_outputs_config->output_config[0].format = QAP_AUDIO_FORMAT_DTS;
-                session_outputs_config->output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_DTS;
+                session_outputs_config.output_config[0].format = QAP_AUDIO_FORMAT_DTS;
+                session_outputs_config.output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_DTS;
             }
 
             if (do_setparam) {
                 ret = qap_session_cmd_l(p_qap->qap_mod[DTS_M8].session_handle,
-                                        session_outputs_config);
+                                        &session_outputs_config);
                 if (QAP_STATUS_OK != ret) {
                     ERROR_MSG("Unable to register AUDIO_DEVICE_OUT_HDMI device with QAP %d", ret);
                     return ret;
@@ -2269,36 +2272,37 @@ static int qap_set_hdmi_configuration_to_module()
     if (!passth_support) {
 
         channels = platform_edid_get_max_channels(p_qap->adev->platform);
-        session_outputs_config->output_config[0].format = QAP_AUDIO_FORMAT_PCM_16_BIT;
+        session_outputs_config.output_config[0].format = QAP_AUDIO_FORMAT_PCM_16_BIT;
+        memcpy(p_qap->ms12_out_format, "pcm", sizeof(p_qap->ms12_out_format) - 1);
 
         switch (channels) {
             case 8:
                 DEBUG_MSG("Switching Qap output to 7.1 channels");
-                session_outputs_config->output_config[0].channels = 8;
+                session_outputs_config.output_config[0].channels = 8;
                 if (!p_qap->qap_msmd_enabled)
-                    session_outputs_config->output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_PCM_16_BIT;
+                    session_outputs_config.output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_PCM_16_BIT;
                 p_qap->hdmi_sink_channels = channels;
                 break;
             case 6:
                 DEBUG_MSG("Switching Qap output to 5.1 channels");
-                session_outputs_config->output_config[0].channels = 6;
+                session_outputs_config.output_config[0].channels = 6;
                 if (!p_qap->qap_msmd_enabled)
-                    session_outputs_config->output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_PCM_16_BIT;
+                    session_outputs_config.output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_PCM_16_BIT;
                 p_qap->hdmi_sink_channels = channels;
                 break;
             default:
                 DEBUG_MSG("Switching Qap output to default channels");
-                session_outputs_config->output_config[0].channels = 2;
+                session_outputs_config.output_config[0].channels = 2;
                 if (!p_qap->qap_msmd_enabled)
-                    session_outputs_config->output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_PCM_16_BIT;
+                    session_outputs_config.output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_PCM_16_BIT;
                 p_qap->hdmi_sink_channels = 2;
                 break;
         }
 
         if (p_qap->qap_mod[MS12].session_handle) {
-            DEBUG_MSG(" Enabling HDMI(MCH PCM out) from MS12 wrapper outputid = %x", session_outputs_config->output_config[0].id);
+            DEBUG_MSG(" Enabling HDMI(MCH PCM out) from MS12 wrapper outputid = %x", session_outputs_config.output_config[0].id);
             ret = qap_session_cmd_l(p_qap->qap_mod[MS12].session_handle,
-                                    session_outputs_config);
+                                    &session_outputs_config);
             if (QAP_STATUS_OK != ret) {
                 ERROR_MSG("Unable to register AUDIO_DEVICE_OUT_HDMI device with QAP %d", ret);
                 return ret;
@@ -2306,7 +2310,7 @@ static int qap_set_hdmi_configuration_to_module()
         }
         if (p_qap->qap_mod[DTS_M8].session_handle) {
                 ret = qap_session_cmd_l(p_qap->qap_mod[DTS_M8].session_handle,
-                                        session_outputs_config);
+                                        &session_outputs_config);
                 if (QAP_STATUS_OK != ret) {
                     ERROR_MSG("Unable to register AUDIO_DEVICE_OUT_HDMI device with QAP %d", ret);
                     return ret;
@@ -2321,18 +2325,14 @@ static int qap_set_hdmi_configuration_to_module()
 static int set_ecref(bool enable) {
 
     int status = 0;
-    qap_session_outputs_config_t *session_outputs_config = NULL;
+    qap_session_outputs_config_t session_outputs_config = {0};
 
     if (p_qap) {
-       if (p_qap->qap_mod[MS12].session_handle)
-           session_outputs_config = &p_qap->qap_mod[MS12].session_outputs_config;
-       else if (p_qap->qap_mod[DTS_M8].session_handle)
-           session_outputs_config = &p_qap->qap_mod[DTS_M8].session_outputs_config;
-       else {
+       if (!p_qap->qap_mod[MS12].session_handle && !p_qap->qap_mod[DTS_M8].session_handle) {
            DEBUG_MSG("EC-ref request comes but session is not setup, caching request");
        }
     } else
-            DEBUG_MSG("EC-ref request comes but session is not setup, caching request");
+            return -EINVAL;
 
     if (enable) {
         if (!ec_ref) {
@@ -2347,15 +2347,15 @@ static int set_ecref(bool enable) {
                     DEBUG_MSG("Proxy dump file opened successfully at /data/vendor/misc/audio/ecref");
             }
 
-            if (session_outputs_config) {
+            if (p_qap->qap_mod[MS12].session_handle) {
                if (p_qap->hdmi_connect) {
                   status = qap_set_hdmi_configuration_to_module();
                } else {
-                  session_outputs_config->num_output = no_of_outputs = 1;
-                  session_outputs_config->output_config[0].id = AUDIO_DEVICE_OUT_SPEAKER;
-                  session_outputs_config->output_config[0].format = QAP_AUDIO_FORMAT_PCM_16_BIT;
+                  session_outputs_config.num_output = no_of_outputs = 1;
+                  session_outputs_config.output_config[0].id = AUDIO_DEVICE_OUT_SPEAKER;
+                  session_outputs_config.output_config[0].format = QAP_AUDIO_FORMAT_PCM_16_BIT;
                   status = qap_session_cmd_l(p_qap->qap_mod[MS12].session_handle,
-                                             session_outputs_config);
+                                             &session_outputs_config);
                }
                if (QAP_STATUS_OK != status) {
                    ERROR_MSG("Unable to register ECREF with QAP %d", status);
@@ -2377,15 +2377,15 @@ static int set_ecref(bool enable) {
                 total_bytes_written = 0;
             }
 
-            if(session_outputs_config) {
+            if(p_qap->qap_mod[MS12].session_handle) {
                if (p_qap->hdmi_connect) {
                   status = qap_set_hdmi_configuration_to_module();
                } else {
-                  session_outputs_config->num_output = no_of_outputs = 1;
-                  session_outputs_config->output_config[0].id = AUDIO_DEVICE_OUT_SPEAKER;
-                  session_outputs_config->output_config[0].format = QAP_AUDIO_FORMAT_PCM_16_BIT;
+                  session_outputs_config.num_output = no_of_outputs = 1;
+                  session_outputs_config.output_config[0].id = AUDIO_DEVICE_OUT_SPEAKER;
+                  session_outputs_config.output_config[0].format = QAP_AUDIO_FORMAT_PCM_16_BIT;
                   status = qap_session_cmd_l(p_qap->qap_mod[MS12].session_handle,
-                                             session_outputs_config);
+                                             &session_outputs_config);
                }
                DEBUG_MSG("EC reference is disabled.");
             }
@@ -2398,7 +2398,7 @@ static int set_ecref(bool enable) {
 
 static void qap_set_default_configuration_to_module()
 {
-    qap_session_outputs_config_t *session_outputs_config = NULL;
+    qap_session_outputs_config_t session_outputs_config = {0};
     int ret = 0;
 
     DEBUG_MSG("Entry");
@@ -2415,21 +2415,16 @@ static void qap_set_default_configuration_to_module()
     //will take care as a part of data callback notifier
 
 
-    if (p_qap->qap_mod[MS12].session_handle)
-        session_outputs_config = &p_qap->qap_mod[MS12].session_outputs_config;
-    else if (p_qap->qap_mod[DTS_M8].session_handle)
-        session_outputs_config = &p_qap->qap_mod[DTS_M8].session_outputs_config;
+    session_outputs_config.num_output = no_of_outputs = 1;
 
-    session_outputs_config->num_output = no_of_outputs = 1;
-
-    session_outputs_config->output_config[0].id = AUDIO_DEVICE_OUT_SPEAKER;
-    session_outputs_config->output_config[0].format = QAP_AUDIO_FORMAT_PCM_16_BIT;
+    session_outputs_config.output_config[0].id = AUDIO_DEVICE_OUT_SPEAKER;
+    session_outputs_config.output_config[0].format = QAP_AUDIO_FORMAT_PCM_16_BIT;
 
     if (p_qap->qap_mod[MS12].session_handle) {
-        DEBUG_MSG(" Enabling speaker(PCM out) from MS12 wrapper outputid = %x", session_outputs_config->output_config[0].id);
+        DEBUG_MSG(" Enabling speaker(PCM out) from MS12 wrapper outputid = %x", session_outputs_config.output_config[0].id);
 
         ret = qap_session_cmd_l(p_qap->qap_mod[MS12].session_handle,
-                            session_outputs_config);
+                            &session_outputs_config);
         if (QAP_STATUS_OK != ret) {
             ERROR_MSG("Unable to register AUDIO_DEVICE_OUT_SPEAKER device with QAP %d", ret);
             return;
@@ -2437,7 +2432,7 @@ static void qap_set_default_configuration_to_module()
     }
     if (p_qap->qap_mod[DTS_M8].session_handle) {
         ret = qap_session_cmd_l(p_qap->qap_mod[DTS_M8].session_handle,
-                            session_outputs_config);
+                            &session_outputs_config);
         if (QAP_STATUS_OK != ret) {
             ERROR_MSG("Unable to register AUDIO_DEVICE_OUT_SPEAKER device with QAP %d", ret);
             return;
@@ -2445,6 +2440,59 @@ static void qap_set_default_configuration_to_module()
     }
 }
 
+static int set_ms12_output_format(const char *out_format) {
+
+   int status = 0;
+
+   if (out_format == NULL)
+       return -EINVAL;
+
+   if (p_qap) {
+       if (!p_qap->qap_mod[MS12].session_handle && !p_qap->qap_mod[DTS_M8].session_handle) {
+           ERROR_MSG("Set request recieved but session is not setup, caching request");
+           memcpy(p_qap->ms12_out_format, out_format, sizeof(p_qap->ms12_out_format) - 1);
+           return status;
+       }
+   } else
+       return -EINVAL;
+
+   if (p_qap->ms12_out_format[0] != '\0' &&
+      strncmp(p_qap->ms12_out_format, out_format, (sizeof(p_qap->ms12_out_format) - 1)) == 0) {
+      DEBUG_MSG_VV("ms12 out format %s is already active", out_format);
+      return status;
+   }
+
+   if (strncmp(out_format, "ddp", 3) == 0) {
+        if (!(p_qap->hdmi_connect &&
+              platform_is_edid_supported_format(p_qap->adev->platform, AUDIO_FORMAT_E_AC3))) {
+              ERROR_MSG("Requested hdmi output format %s is not supported by sink", out_format);
+              return -ENOTSUP;
+        }
+   } else if (strncmp(out_format, "dd", 2) == 0) {
+        if (!(p_qap->hdmi_connect &&
+             platform_is_edid_supported_format(p_qap->adev->platform, AUDIO_FORMAT_AC3))) {
+             ERROR_MSG("Requested hdmi output format %s is not supported by sink", out_format);
+             return -ENOTSUP;
+        }
+   } else if (strncmp(out_format, "pcm", 3) == 0) {
+        property_set("vendor.audio.qap.reencode", "false");
+   } else {
+        ERROR_MSG("Not supported ms12 output format: %s", out_format);
+        return -ENOTSUP;
+   }
+
+   memcpy(p_qap->ms12_out_format, out_format, sizeof(p_qap->ms12_out_format) - 1);
+
+   if (p_qap->hdmi_connect) {
+       if (strncmp(p_qap->ms12_out_format, "pcm", 3) != 0)
+           property_set("vendor.audio.qap.reencode", "true");
+
+       status = qap_set_hdmi_configuration_to_module();
+   } else
+       qap_set_default_configuration_to_module();
+
+   return 0;
+}
 
 /* Open a MM module session with QAP. */
 static int audio_extn_qap_session_open(mm_module_type mod_type, __unused struct stream_out *out)
@@ -2831,6 +2879,12 @@ static int qap_out_set_parameters(struct audio_stream *stream, const char *kvpai
                         (struct audio_stream *)p_qap->passthrough_out, kvpairs);
             }
         }
+    } else {
+      //Send the routing information to mm module pcm output.
+      if (qap_mod->stream_out[QAP_OUT_OFFLOAD] && !p_qap->hdmi_connect) {
+          ret = qap_mod->stream_out[QAP_OUT_OFFLOAD]->stream.common.set_parameters(
+                (struct audio_stream *)qap_mod->stream_out[QAP_OUT_OFFLOAD], kvpairs);
+      }
     }
     str_parms_destroy(parms);
 
@@ -3053,7 +3107,8 @@ bool audio_extn_qap_is_enabled()
 int audio_extn_qap_set_parameters(struct audio_device *adev, struct str_parms *parms)
 {
     int status = 0, val = 0;
-    qap_session_outputs_config_t *session_outputs_config = NULL;
+    char value[4] = {0};
+    qap_session_outputs_config_t session_outputs_config = {0};
 
     if (!p_qap) {
         return -EINVAL;
@@ -3067,6 +3122,12 @@ int audio_extn_qap_set_parameters(struct audio_device *adev, struct str_parms *p
            set_ecref(true);
         else
            set_ecref(false);
+    }
+
+    status = str_parms_get_str(parms, "ms12_out_format", value, sizeof(value));
+    if (status > 0) {
+        status = set_ms12_output_format(value);
+        DEBUG_MSG("Set ms12 output format to %s is %s", value, status ? "failed" : "success");
     }
 
     status = str_parms_get_int(parms, AUDIO_PARAMETER_DEVICE_CONNECT, &val);
@@ -3124,25 +3185,21 @@ int audio_extn_qap_set_parameters(struct audio_device *adev, struct str_parms *p
             p_qap->mch_pcm_hdmi_enabled = 0;
             p_qap->hdmi_connect = 0;
 
-            if (p_qap->qap_mod[MS12].session_handle)
-                session_outputs_config = &p_qap->qap_mod[MS12].session_outputs_config;
-            else if (p_qap->qap_mod[DTS_M8].session_handle)
-                session_outputs_config = &p_qap->qap_mod[DTS_M8].session_outputs_config;
-            else {
+            if (!p_qap->qap_mod[MS12].session_handle && !p_qap->qap_mod[DTS_M8].session_handle) {
                 DEBUG_MSG("HDMI disconnection comes even before session is setup");
                 return 0;
             }
 
-            session_outputs_config->num_output = no_of_outputs = 1;
+            session_outputs_config.num_output = no_of_outputs = 1;
 
-            session_outputs_config->output_config[0].id = AUDIO_DEVICE_OUT_SPEAKER;
-            session_outputs_config->output_config[0].format = QAP_AUDIO_FORMAT_PCM_16_BIT;
+            session_outputs_config.output_config[0].id = AUDIO_DEVICE_OUT_SPEAKER;
+            session_outputs_config.output_config[0].format = QAP_AUDIO_FORMAT_PCM_16_BIT;
 
             if (p_qap->qap_mod[MS12].session_handle) {
-                DEBUG_MSG(" Enabling speaker(PCM out) from MS12 wrapper outputid = %x", session_outputs_config->output_config[0].id);
+                DEBUG_MSG(" Enabling speaker(PCM out) from MS12 wrapper outputid = %x", session_outputs_config.output_config[0].id);
 
                 status = qap_session_cmd_l(p_qap->qap_mod[MS12].session_handle,
-                                    session_outputs_config);
+                                    &session_outputs_config);
                 if (QAP_STATUS_OK != status) {
                     ERROR_MSG("Unable to register AUDIO_DEVICE_OUT_SPEAKER device with QAP %d",status);
                     return -EINVAL;
@@ -3150,7 +3207,7 @@ int audio_extn_qap_set_parameters(struct audio_device *adev, struct str_parms *p
             }
             if (p_qap->qap_mod[DTS_M8].session_handle) {
                 status = qap_session_cmd_l(p_qap->qap_mod[MS12].session_handle,
-                                    session_outputs_config);
+                                    &session_outputs_config);
                 if (QAP_STATUS_OK != status) {
                     ERROR_MSG("Unable to register AUDIO_DEVICE_OUT_SPEAKER device with QAP %d", status);
                     return -EINVAL;
