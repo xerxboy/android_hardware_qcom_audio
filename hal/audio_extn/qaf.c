@@ -100,6 +100,7 @@
 #include <pthread.h>
 #include <errno.h>
 #include <dlfcn.h>
+#include <unistd.h>
 #include <sys/resource.h>
 #include <sys/prctl.h>
 #include <cutils/properties.h>
@@ -306,7 +307,7 @@ static bool check_stream_state(struct stream_out *out, int state)
 {
     struct qaf_module *qaf_mod = get_qaf_module_for_input_stream(out);
     int index = get_input_stream_index(out);
-    if (qaf_mod && index >= 0) return (qaf_mod->stream_state[index] == state);
+    if (qaf_mod && index >= 0) return ((int)qaf_mod->stream_state[index] == state);
     return false;
 }
 
@@ -1905,7 +1906,7 @@ static int qaf_stream_close(struct stream_out *out)
 }
 
 /* Open a MM module session with QAF. */
-static int audio_extn_qaf_session_open(mm_module_type mod_type, struct stream_out *out)
+static int audio_extn_qaf_session_open(mm_module_type mod_type, __unused struct stream_out *out)
 {
     ALOGV("%s %d", __func__, __LINE__);
     unsigned char* license_data = NULL;

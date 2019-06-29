@@ -325,15 +325,15 @@ ssize_t qahwi_out_write_v2(struct audio_stream_out *stream, const void* buffer,
         memcpy(buf + mdata_size, buffer, bytes);
         ret = out->qahwi_out.base.write(&out->stream, (void *)buf, out->qahwi_out.buf_size);
         if (ret <= 0) {
-            ALOGE("%s: error! write returned %jd", __func__, (intmax_t) ret);
+            ALOGE("%s: error! write returned %ld", __func__, (intmax_t) ret);
         } else {
             bytes_written = bytes;
         }
-        ALOGV("%s: flag 0x%x, bytes %zd, read %zd, ret %jd timestamp 0x%"PRIx64"",
+        ALOGV("%s: flag 0x%x, bytes %zd, read %zd, ret %ld timestamp 0x%"PRIx64"",
               __func__, out->flags, bytes, bytes_written, (intmax_t) ret, timestamp == NULL ? 0 : *timestamp);
     } else {
         bytes_written = out->qahwi_out.base.write(&out->stream, buffer, bytes);
-        ALOGV("%s: flag 0x%x, bytes %zd, read %zd, ret %jd",
+        ALOGV("%s: flag 0x%x, bytes %zd, read %zd, ret %ld",
               __func__, out->flags, bytes, bytes_written, (intmax_t) ret);
     }
     return bytes_written;

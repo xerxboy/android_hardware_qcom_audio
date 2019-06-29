@@ -2052,7 +2052,6 @@ int start_playback_through_qap(char * kvp_string, int num_of_streams,  qahw_modu
         }
         get_file_format(stream);
         fprintf(stdout, "Playing from:%s\n", stream->filename);
-        qap_module_handle_t qap_module_handle = NULL;
         if (!qap_wrapper_session_active) {
             rc = qap_wrapper_session_open(kvp_string, stream, num_of_streams, hal_handle);
             if (rc != 0) {
