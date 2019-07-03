@@ -250,7 +250,7 @@
                 <route type="mix" sink="USB Device Out"
                        sources="primary output,voip_rx"/>
                 <route type="mix" sink="USB Headset Out"
-                       sources="primary output,voip_rx,hifi_playback"/>
+                       sources="primary output,voip_rx"/>
                 <route type="mix" sink="Telephony Tx"
                        sources="voice_tx"/>
                 <route type="mix" sink="voice_rx"
