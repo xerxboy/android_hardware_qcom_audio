@@ -134,6 +134,9 @@
 FILE *fp_output_writer_hdmi = NULL;
 #endif
 
+qap_output_delay_t main_delay_event_data = {0};
+bool delay_event_fired = false;
+
 //Types of MM module, currently supported by QAP.
 typedef enum {
     MS12,
@@ -191,6 +194,7 @@ struct qap_module {
     qap_stream_state stream_state[MAX_QAP_MODULE_IN];
     bool is_session_closing;
     bool is_session_output_active;
+    unsigned long long qap_output_bytes_written[MAX_QAP_MODULE_OUT];
     pthread_cond_t session_output_cond;
     pthread_mutex_t session_output_lock;
 
@@ -203,6 +207,7 @@ struct qap {
 
     bool bt_connect;
     bool hdmi_connect;
+    char ms12_out_format[4];
     int hdmi_sink_channels;
 
     //Flag to indicate if QAP transcode output stream is enabled from any mm module.
@@ -222,8 +227,21 @@ struct qap {
     struct qap_module qap_mod[MAX_MM_MODULE_TYPE];
 };
 
+#define MAX_OUTPUTS  2
+#define MAX_OUT_BUFFER   (10*1024)
 //Global handle of QAP. Access to this should be protected by mutex lock.
 static struct qap *p_qap = NULL;
+
+struct data_cb_data {
+    void * buff_ptr;
+    int buff_size;
+    uint32_t dev_id;
+};
+static struct data_cb_data cb_data_array[MAX_OUTPUTS];
+static int no_of_outputs  = 0;
+static long long total_bytes_written = 0;
+FILE *proxy_out_ptr = NULL;
+bool ec_ref = false;
 
 /* Gets the pointer to qap module for the qap input stream. */
 static struct qap_module* get_qap_module_for_input_stream_l(struct stream_out *out)
@@ -455,6 +473,61 @@ static void close_all_hdmi_output_l()
     p_qap->passthrough_enabled = 0;
 
     close_all_pcm_hdmi_output_l();
+}
+
+#define DSD_VOLUME_MIN_DB (-96)
+static float AmpToDb(float amplification)
+{
+     float db = DSD_VOLUME_MIN_DB;
+     if (amplification > 0) {
+         db = 20 * log10(amplification);
+         if(db < DSD_VOLUME_MIN_DB)
+             return DSD_VOLUME_MIN_DB;
+     }
+     return db;
+}
+
+/*
+* get the MS12 o/p stream and update the volume
+*/
+static int qap_set_stream_volume(struct audio_stream_out *stream, float left, float right)
+{
+    int ret = 0;
+    struct stream_out *out = (struct stream_out *)stream;
+    struct qap_module *qap_mod = get_qap_module_for_input_stream_l(out);
+    int32_t cmd_data[4] = {0};
+
+    DEBUG_MSG("Left %f, Right %f", left, right);
+
+    if (is_offload_usecase(out->usecase))
+        cmd_data[0] = MS12_SESSION_CFG_SYSSOUND_MIXING_GAIN_INPUT1;
+    else if ((out->usecase == USECASE_AUDIO_PLAYBACK_LOW_LATENCY) ||
+             (out->usecase == USECASE_AUDIO_PLAYBACK_DEEP_BUFFER)) {
+              DEBUG_MSG("Request for volume set for %s usecase not supported",
+(                      out->usecase == USECASE_AUDIO_PLAYBACK_LOW_LATENCY) ? "low_latency":"deepbuffer");
+              return -ENOSYS;
+    }
+
+    /*take left as default level and MS12 doenst support left and right seperately*/
+    cmd_data[1] = AmpToDb(left);
+    cmd_data[2] = 0;/* apply gain instantly*/
+    cmd_data[3] = 0;/* apply gain linearly*/
+
+    if (qap_mod->session_handle != NULL) {
+        ret = qap_session_cmd(qap_mod->session_handle,
+                QAP_SESSION_CMD_SET_PARAM,
+                sizeof(cmd_data),
+                &cmd_data[0],
+                NULL,
+                NULL);
+        if (ret != QAP_STATUS_OK) {
+            ERROR_MSG("vol set failed");
+        }
+    } else
+        DEBUG_MSG("qap module is not yet opened!!, vol cannot be applied");
+
+    DEBUG_MSG("Exit");
+    return ret;
 }
 
 static int qap_out_callback(stream_callback_event_t event, void *param __unused, void *cookie)
@@ -752,8 +825,8 @@ static int qap_out_standby(struct audio_stream *stream)
           stream, out->usecase, use_case_table[out->usecase]);
 
     lock_output_stream_l(out);
-    DEBUG_MSG("Total bytes consumed %llu[frames] by stream (%p) to MM Module",
-              (unsigned long long)out->written, stream);
+    DEBUG_MSG("Total bytes consumed %llu[frames] for usecase %s stream (%p) by MM Module",
+              (unsigned long long)out->written, use_case_table[out->usecase], stream);
 
     //If QAP passthrough is active then block standby on all the input streams of QAP mm modules.
     if (p_qap->passthrough_out) {
@@ -796,34 +869,6 @@ static int qap_out_standby(struct audio_stream *stream)
 
     unlock_output_stream_l(out);
     return status;
-}
-
-/* Sets the volume to PCM output stream. */
-static int qap_out_set_volume(struct audio_stream_out *stream, float left, float right)
-{
-    int ret = 0;
-    struct stream_out *out = (struct stream_out *)stream;
-    struct qap_module *qap_mod = NULL;
-
-    DEBUG_MSG("Left %f, Right %f", left, right);
-
-    qap_mod = get_qap_module_for_input_stream_l(out);
-    if (!qap_mod) {
-        return -EINVAL;
-    }
-
-    pthread_mutex_lock(&p_qap->lock);
-    qap_mod->vol_left = left;
-    qap_mod->vol_right = right;
-    qap_mod->is_vol_set = true;
-    pthread_mutex_unlock(&p_qap->lock);
-
-    if (qap_mod->stream_out[QAP_OUT_OFFLOAD] != NULL) {
-        ret = qap_mod->stream_out[QAP_OUT_OFFLOAD]->stream.set_volume(
-                (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_OFFLOAD], left, right);
-    }
-
-    return ret;
 }
 
 /* Starts a QAP module stream. */
@@ -908,7 +953,8 @@ static int qap_module_write_input_buffer(struct stream_out *out, const void *buf
     buff.common_params.data = (void *) buffer;
     buff.common_params.timestamp = QAP_BUFFER_NO_TSTAMP;
     buff.buffer_parms.input_buf_params.flags = QAP_BUFFER_NO_TSTAMP;
-    DEBUG_MSG("calling module process with bytes %d %p", bytes, buffer);
+    DEBUG_MSG_VV("calling module process for usecase %s stream %p with bytes %d %p",
+                 use_case_table[out->usecase], out, bytes, buffer);
     ret  = qap_module_process(out->qap_stream_handle, &buff);
 
     if(ret > 0) set_stream_state_l(out, RUN);
@@ -968,7 +1014,8 @@ static ssize_t qap_out_write(struct audio_stream_out *stream, const void *buffer
     }
 
     ret = qap_module_write_input_buffer(out, buffer, bytes);
-    DEBUG_MSG_VV("Bytes consumed [%d] by MM Module", (int)ret);
+    DEBUG_MSG_VV("Bytes consumed [%d] by MM Module for usecase %s stream %p",
+                 (int)ret, use_case_table[out->usecase], out);
 
     if (ret >= 0) {
         out->written += ret / ((popcount(out->channel_mask) * sizeof(short)));
@@ -1074,16 +1121,12 @@ static int get_buffer_latency(struct stream_out *out, uint32_t buffer_size, uint
 static int qap_get_rendered_frames(struct stream_out *out, uint64_t *frames)
 {
     int ret = 0, i;
-    struct str_parms *parms;
-//    int value = 0;
+    unsigned long long position = 0;
     int module_latency = 0;
     uint32_t kernel_latency = 0;
     uint32_t dsp_latency = 0;
-    int signed_frames = 0;
-    char* kvpairs = NULL;
+    uint64_t signed_frames = 0;
     struct qap_module *qap_mod = NULL;
-
-    DEBUG_MSG("Output Format %d", out->format);
 
     qap_mod = get_qap_module_for_input_stream_l(out);
     if (!qap_mod || !qap_mod->session_handle|| !out->qap_stream_handle) {
@@ -1092,21 +1135,14 @@ static int qap_get_rendered_frames(struct stream_out *out, uint64_t *frames)
         return -EINVAL;
     }
 
-    //Get MM module latency.
-/* Tobeported
-    kvpairs = qap_mod->qap_audio_stream_get_param(out->qap_stream_handle, "get_latency");
-*/
-    if (kvpairs) {
-        parms = str_parms_create_str(kvpairs);
-        ret = str_parms_get_int(parms, "get_latency", &module_latency);
-        if (ret >= 0) {
-            str_parms_destroy(parms);
-            parms = NULL;
-        }
-        free(kvpairs);
-        kvpairs = NULL;
-    }
-
+    if (delay_event_fired == true) {
+        module_latency += main_delay_event_data.algo_delay;
+        module_latency += main_delay_event_data.buffering_delay;
+//      module_latency += main_delay_event_data.non_main_data_length;
+//      module_latency += main_delay_event_data.non_main_data_offset;
+        // MS12 gives latency in terms of samples convert them to time domain
+        module_latency = (module_latency*1000)/48000;
+     }
     //Get kernel Latency
     for (i = MAX_QAP_MODULE_OUT - 1; i >= 0; i--) {
         if (qap_mod->stream_out[i] == NULL) {
@@ -1153,6 +1189,9 @@ static int qap_get_rendered_frames(struct stream_out *out, uint64_t *frames)
         out->platform_latency = (uint32_t)module_latency + kernel_latency + dsp_latency;
     }
 
+    DEBUG_MSG_VV("total platform latency %d msec MS12(%d)+kernel_latency(%d)+dsp_latency(%d)",
+        out->platform_latency, module_latency, kernel_latency, dsp_latency);
+
     if (out->format & AUDIO_FORMAT_PCM_16_BIT) {
         *frames = 0;
         signed_frames = out->written - out->platform_latency;
@@ -1160,29 +1199,25 @@ static int qap_get_rendered_frames(struct stream_out *out, uint64_t *frames)
         if (signed_frames >= 0) {
             *frames = signed_frames;
         }
-/* Tobeported
-        }
-        else {
-
-        kvpairs = qap_mod->qap_audio_stream_get_param(out->qap_stream_handle, "position");
-    if (kvpairs) {
-        parms = str_parms_create_str(kvpairs);
-        ret = str_parms_get_int(parms, "position", &value);
+    } else {
+        uint32_t param_id = MS12_STREAM_GET_POSITION;
+        ret = qap_module_cmd(out->qap_stream_handle,
+                                    QAP_MODULE_CMD_GET_PARAM,
+                                    sizeof(param_id),
+                                    &param_id,
+                                    NULL,
+                                    &position);
+        DEBUG_MSG_VV("Frames returned by MS12(%d)", position);
         if (ret >= 0) {
-            *frames = value;
-            signed_frames = value - out->platform_latency;
+            *frames = position;
+            signed_frames = position - out->platform_latency;
             // It would be unusual for this value to be negative, but check just in case ...
             if (signed_frames >= 0) {
                 *frames = signed_frames;
             }
-        }
-        str_parms_destroy(parms);
+        } else 
+            ret = -EINVAL;
     }
-*/
-    } else {
-        ret = -EINVAL;
-    }
-
     return ret;
 }
 
@@ -1193,12 +1228,11 @@ static int qap_out_get_render_position(const struct audio_stream_out *stream,
     int ret = 0;
     uint64_t frames=0;
     struct qap_module* qap_mod = NULL;
-    ALOGV("%s, Output Stream %p,dsp frames %d",__func__, stream, (int)dsp_frames);
 
     qap_mod = get_qap_module_for_input_stream_l(out);
     if (!qap_mod) {
         ret = out->stream.get_render_position(stream, dsp_frames);
-        ALOGV("%s, non qap_MOD DSP FRAMES %d",__func__, (int)dsp_frames);
+        DEBUG_MSG("non qap_MOD DSP FRAMES %d", (int)dsp_frames);
         return ret;
     }
 
@@ -1206,13 +1240,14 @@ static int qap_out_get_render_position(const struct audio_stream_out *stream,
         pthread_mutex_lock(&p_qap->lock);
         ret = p_qap->passthrough_out->stream.get_render_position((struct audio_stream_out *)p_qap->passthrough_out, dsp_frames);
         pthread_mutex_unlock(&p_qap->lock);
-        ALOGV("%s, PASS THROUGH DSP FRAMES %p",__func__, dsp_frames);
+        DEBUG_MSG("PASS THROUGH DSP FRAMES %p", dsp_frames);
         return ret;
         }
     frames=*dsp_frames;
     ret = qap_get_rendered_frames(out, &frames);
     *dsp_frames = (uint32_t)frames;
-    ALOGV("%s, DSP FRAMES %d",__func__, (int)dsp_frames);
+    DEBUG_MSG_VV("DSP FRAMES %ud for out(%p)", *dsp_frames, out);
+
     return ret;
 }
 
@@ -1223,7 +1258,6 @@ static int qap_out_get_presentation_position(const struct audio_stream_out *stre
     struct stream_out *out = (struct stream_out *)stream;
     int ret = 0;
 
-//    DEBUG_MSG_VV("Output Stream %p", stream);
 
     //If QAP passthorugh output stream is active.
     if (p_qap->passthrough_out) {
@@ -1245,6 +1279,8 @@ static int qap_out_get_presentation_position(const struct audio_stream_out *stre
 
     ret = qap_get_rendered_frames(out, frames);
     clock_gettime(CLOCK_MONOTONIC, timestamp);
+
+    DEBUG_MSG_VV("frames(%llu) for out(%p)", (unsigned long long)*frames, out);
 
     return ret;
 }
@@ -1302,6 +1338,26 @@ static uint32_t qap_out_get_latency(const struct audio_stream_out *stream)
     return latency;
 }
 
+static int qap_session_cmd_l(audio_session_handle_t session_handle, qap_session_outputs_config_t *outputs_config){
+    int status = 0;
+
+    if (ec_ref){
+        no_of_outputs++;
+        outputs_config->num_output = no_of_outputs;
+        outputs_config->output_config[no_of_outputs - 1].format = QAP_AUDIO_FORMAT_PCM_16_BIT;
+        outputs_config->output_config[no_of_outputs - 1].id = AUDIO_DEVICE_OUT_PROXY;
+
+        DEBUG_MSG(" Enabling PROXY(pcm out) from MS12 wrapper outputid = 0x%x",
+                    outputs_config->output_config[no_of_outputs - 1].id);
+
+    }
+    status = qap_session_cmd(session_handle, QAP_SESSION_CMD_SET_OUTPUTS,
+                             sizeof(qap_session_outputs_config_t),
+                             outputs_config, NULL, NULL);
+
+    return status;
+}
+
 static bool qap_check_and_get_compressed_device_format(int device, int *format)
 {
     switch (device) {
@@ -1354,14 +1410,18 @@ void static qap_close_all_output_streams(struct qap_module *qap_mod)
         stream_out = qap_mod->stream_out[i];
         if (stream_out != NULL) {
             adev_close_output_stream((struct audio_hw_device *)p_qap->adev, (struct audio_stream_out *)stream_out);
-            DEBUG_MSG("Closed outputenum=%d session 0x%x %s",
-                    i, (int)stream_out, use_case_table[stream_out->usecase]);
+            DEBUG_MSG("Closed outputenum=%d session 0x%x %s, with total bytes of %llu consumed by hal",
+                    i, (int)stream_out, use_case_table[stream_out->usecase],
+                    qap_mod->qap_output_bytes_written[i]);
             qap_mod->stream_out[i] = NULL;
+            qap_mod->qap_output_bytes_written[i] = 0;
         }
         memset(&qap_mod->session_outputs_config.output_config[i], 0, sizeof(qap_session_outputs_config_t));
         qap_mod->is_media_fmt_changed[i] = false;
+        delay_event_fired = false;
     }
     p_qap->passthrough_enabled = false;
+
     DEBUG_MSG("exit");
 }
 
@@ -1383,6 +1443,10 @@ static void qap_session_callback(qap_session_handle_t session_handle __unused,
      data to the HDMI device.
      */
     int ret;
+    int cb_array_index = 0;
+    static int abs_index = 0;
+    int i;
+    uint32_t bytes_written = 0;
     audio_output_flags_t flags;
     struct qap_module* qap_mod = (struct qap_module*)prv_data;
     struct audio_stream_out *bt_stream = NULL;
@@ -1424,6 +1488,8 @@ static void qap_session_callback(qap_session_handle_t session_handle __unused,
 
     if (event_id == QAP_CALLBACK_EVENT_OUTPUT_CFG_CHANGE) {
         new_conf = &buffer->buffer_parms.output_buf_params.output_config;
+        /* Assign QAP device id since new conf has ms12 deviceid */
+        new_conf->id = buffer->buffer_parms.output_buf_params.output_id;
         qap_output_config_t *cached_conf = NULL;
         int index = -1;
 
@@ -1442,8 +1508,6 @@ static void qap_session_callback(qap_session_handle_t session_handle __unused,
         }
 
         index = get_media_fmt_array_index_for_output_id_l(qap_mod, buffer->buffer_parms.output_buf_params.output_id);
-
-        DEBUG_MSG("index = %d", index);
 
         if (index >= 0) {
             cached_conf = &qap_mod->session_outputs_config.output_config[index];
@@ -1467,404 +1531,449 @@ static void qap_session_callback(qap_session_handle_t session_handle __unused,
         buffer_size = buffer->common_params.size;
         device = buffer->buffer_parms.output_buf_params.output_id;
 
+        abs_index++;
+        cb_array_index =abs_index%no_of_outputs;
+
         DEBUG_MSG_VV("Received QAP_CALLBACK_EVENT_DATA event buff size(%d) for outputid=0x%x",
             buffer_size, buffer->buffer_parms.output_buf_params.output_id);
 
-        if (buffer && buffer->common_params.data) {
-            int index = -1;
+        cb_data_array[abs_index-1].buff_size = buffer->common_params.size;
+        memcpy(cb_data_array[abs_index-1].buff_ptr, (int8_t*)buffer->common_params.data+buffer->common_params.offset, buffer->common_params.size);
+        cb_data_array[abs_index-1].dev_id = buffer->buffer_parms.output_buf_params.output_id;
 
-            index = get_media_fmt_array_index_for_output_id_l(qap_mod, buffer->buffer_parms.output_buf_params.output_id);
-            DEBUG_MSG("index = %d", index);
-            if (index > -1 && qap_mod->is_media_fmt_changed[index]) {
-                DEBUG_MSG("FORMAT changed, recreate stream");
-                need_to_recreate_stream = true;
-                qap_mod->is_media_fmt_changed[index] = false;
 
-                qap_output_config_t *new_config = &qap_mod->session_outputs_config.output_config[index];
-
-                config.sample_rate = config.offload_info.sample_rate = new_config->sample_rate;
-                config.offload_info.version = AUDIO_INFO_INITIALIZER.version;
-                config.offload_info.size = AUDIO_INFO_INITIALIZER.size;
-                config.offload_info.bit_width = new_config->bit_width;
-
-                if (new_config->format == QAP_AUDIO_FORMAT_PCM_16_BIT) {
-                    if (new_config->bit_width == 16)
-                        config.format = config.offload_info.format = AUDIO_FORMAT_PCM_16_BIT;
-                    else if (new_config->bit_width == 24)
-                        config.format = config.offload_info.format = AUDIO_FORMAT_PCM_24_BIT_PACKED;
-                    else
-                        config.format = config.offload_info.format = AUDIO_FORMAT_PCM_32_BIT;
-                } else if (new_config->format  == QAP_AUDIO_FORMAT_AC3)
-                    config.format = config.offload_info.format = AUDIO_FORMAT_AC3;
-                else if (new_config->format  == QAP_AUDIO_FORMAT_EAC3)
-                    config.format = config.offload_info.format = AUDIO_FORMAT_E_AC3;
-                else if (new_config->format  == QAP_AUDIO_FORMAT_DTS)
-                    config.format = config.offload_info.format = AUDIO_FORMAT_DTS;
-
-                device |= (new_config->format & AUDIO_FORMAT_MAIN_MASK);
-
-                config.channel_mask = audio_channel_out_mask_from_count(new_config->channels);
-                config.offload_info.channel_mask = config.channel_mask;
-                DEBUG_MSG("sample rate=%d bitwidth=%d format = %d channels=%d channel_mask=%d device =0x%x",
-                    config.sample_rate,
-                    config.offload_info.bit_width,
-                    config.offload_info.format,
-                    new_config->channels,
-                    config.channel_mask,
-                    device);
-            }
-        }
-
-        if (p_qap->passthrough_out != NULL) {
-            //If QAP passthrough is active then all the module output will be dropped.
+        if(cb_array_index == 0) {
+            DEBUG_MSG_VV("callback (%d) recieved out of (%d) data cached at %p", abs_index, no_of_outputs, cb_data_array[abs_index-1].buff_ptr);
+            DEBUG_MSG_VV("all callbacks recieved process them in loop");
+            abs_index = 0;
+        } else {
+            DEBUG_MSG_VV("callback (%d) recieved out of (%d)", cb_array_index, no_of_outputs);
             pthread_mutex_unlock(&p_qap->lock);
-            DEBUG_MSG("QAP-PSTH is active, DROPPING DATA!");
             return;
         }
 
-        if (qap_check_and_get_compressed_device_format(device, &format)) {
-            /*
-             * CASE 1: Transcoded output of mm module.
-             * If HDMI is not connected then drop the data.
-             * Only one HDMI output can be supported from all the mm modules of QAP.
-             * Multi-Channel PCM HDMI output streams will be closed from all the mm modules.
-             * If transcoded output of other module is already enabled then this data will be dropped.
-             */
+        for(i=0; i<no_of_outputs; i++) {
+            data_buffer_p = cb_data_array[i].buff_ptr ;
+            buffer_size = cb_data_array[i].buff_size ;
+            device = cb_data_array[i].dev_id;
 
-            if (!p_qap->hdmi_connect) {
-                DEBUG_MSG("HDMI not connected, DROPPING DATA!");
+            DEBUG_MSG_VV("callback (%d) buffer_size (%d) data_buffer_p(%p) device 0x%x",i, buffer_size, data_buffer_p, device);
+
+            if(device == AUDIO_DEVICE_OUT_PROXY) {
+                if(proxy_out_ptr) {
+                    bytes_written = fwrite(data_buffer_p, 1, buffer_size, proxy_out_ptr);
+                    if (bytes_written != buffer_size) {
+                        ERROR_MSG("unable to write to proxy dump");
+                        fclose(proxy_out_ptr);
+                        proxy_out_ptr = NULL;
+                    }
+                    else
+                        total_bytes_written += bytes_written;
+                }
+                continue;
+            }
+
+            if (buffer && buffer->common_params.data) {
+                int index = -1;
+
+                index = get_media_fmt_array_index_for_output_id_l(qap_mod, device);
+                if (index > -1 && qap_mod->is_media_fmt_changed[index]) {
+                    DEBUG_MSG("FORMAT changed, recreate stream");
+                    need_to_recreate_stream = true;
+                    qap_mod->is_media_fmt_changed[index] = false;
+
+                    qap_output_config_t *new_config = &qap_mod->session_outputs_config.output_config[index];
+
+                    config.sample_rate = config.offload_info.sample_rate = new_config->sample_rate;
+                    config.offload_info.version = AUDIO_INFO_INITIALIZER.version;
+                    config.offload_info.size = AUDIO_INFO_INITIALIZER.size;
+                    config.offload_info.bit_width = new_config->bit_width;
+
+                    if (new_config->format == QAP_AUDIO_FORMAT_PCM_16_BIT) {
+                        if (new_config->bit_width == 16)
+                            config.format = config.offload_info.format = AUDIO_FORMAT_PCM_16_BIT;
+                        else if (new_config->bit_width == 24)
+                            config.format = config.offload_info.format = AUDIO_FORMAT_PCM_24_BIT_PACKED;
+                        else
+                            config.format = config.offload_info.format = AUDIO_FORMAT_PCM_32_BIT;
+                    } else if (new_config->format  == QAP_AUDIO_FORMAT_AC3)
+                        config.format = config.offload_info.format = AUDIO_FORMAT_AC3;
+                    else if (new_config->format  == QAP_AUDIO_FORMAT_EAC3)
+                        config.format = config.offload_info.format = AUDIO_FORMAT_E_AC3;
+                    else if (new_config->format  == QAP_AUDIO_FORMAT_DTS)
+                        config.format = config.offload_info.format = AUDIO_FORMAT_DTS;
+
+                    device |= (new_config->format & AUDIO_FORMAT_MAIN_MASK);
+
+                    config.channel_mask = audio_channel_out_mask_from_count(new_config->channels);
+                    config.offload_info.channel_mask = config.channel_mask;
+                    DEBUG_MSG("sample rate=%d bitwidth=%d format = %d channels=%d channel_mask=%d device =0x%x",
+                        config.sample_rate,
+                        config.offload_info.bit_width,
+                        config.offload_info.format,
+                        new_config->channels,
+                        config.channel_mask,
+                        device);
+                }
+            }
+
+            if (p_qap->passthrough_out != NULL) {
+                //If QAP passthrough is active then all the module output will be dropped.
                 pthread_mutex_unlock(&p_qap->lock);
+                DEBUG_MSG("QAP-PSTH is active, DROPPING DATA!");
                 return;
             }
 
-            //Closing all the PCM HDMI output stream from QAP.
-            close_all_pcm_hdmi_output_l();
+            if (qap_check_and_get_compressed_device_format(device, &format)) {
+                /*
+                 * CASE 1: Transcoded output of mm module.
+                 * If HDMI is not connected then drop the data.
+                 * Only one HDMI output can be supported from all the mm modules of QAP.
+                 * Multi-Channel PCM HDMI output streams will be closed from all the mm modules.
+                 * If transcoded output of other module is already enabled then this data will be dropped.
+                 */
 
-            /* If Media format was changed for this stream then need to re-create the stream. */
-            if (need_to_recreate_stream && qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]) {
-                DEBUG_MSG("closing Transcode Passthrough session ox%x",
-                    (int)qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]);
-                adev_close_output_stream((struct audio_hw_device *)p_qap->adev,
-                                         (struct audio_stream_out *)(qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]));
-                qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH] = NULL;
-                p_qap->passthrough_enabled = false;
-            }
-
-            if (!p_qap->passthrough_enabled
-                && !(qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH])) {
-
-                audio_devices_t devices;
-
-                config.format = config.offload_info.format = format;
-                config.offload_info.channel_mask = config.channel_mask = AUDIO_CHANNEL_OUT_5POINT1;
-
-                flags = (AUDIO_OUTPUT_FLAG_NON_BLOCKING
-                         | AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD
-                         | AUDIO_OUTPUT_FLAG_DIRECT
-                         | AUDIO_OUTPUT_FLAG_COMPRESS_PASSTHROUGH);
-                devices = AUDIO_DEVICE_OUT_AUX_DIGITAL;
-
-                DEBUG_MSG("Opening Transcode Passthrough out(outputenum=%d) session 0x%x with below params",
-                        QAP_OUT_TRANSCODE_PASSTHROUGH,
-                        (int)qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]);
-
-                DEBUG_MSG("sample rate=%d bitwidth=%d format = 0x%x channel mask=0x%x flags=0x%x device =0x%x",
-                    config.sample_rate,
-                    config.offload_info.bit_width,
-                    config.offload_info.format,
-                    config.offload_info.channel_mask,
-                    flags,
-                    devices);
-
-                ret = adev_open_output_stream((struct audio_hw_device *)p_qap->adev,
-                                              QAP_DEFAULT_COMPR_PASSTHROUGH_HANDLE,
-                                              devices,
-                                              flags,
-                                              &config,
-                                              (struct audio_stream_out **)&(qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]),
-                                              NULL);
-                if (ret < 0) {
-                    ERROR_MSG("Failed opening Transcode Passthrough out(outputenum=%d) session 0x%x",
-                            QAP_OUT_TRANSCODE_PASSTHROUGH,
-                            (int)qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]);
+                if (!p_qap->hdmi_connect) {
+                    DEBUG_MSG("HDMI not connected, DROPPING DATA!");
                     pthread_mutex_unlock(&p_qap->lock);
                     return;
-                } else
-                    DEBUG_MSG("Opened Transcode Passthrough out(outputenum=%d) session 0x%x",
-                            QAP_OUT_TRANSCODE_PASSTHROUGH,
-                            (int)qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]);
-
-
-                if (format == AUDIO_FORMAT_E_AC3) {
-                    qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]->compr_config.fragment_size =
-                            COMPRESS_PASSTHROUGH_DDP_FRAGMENT_SIZE;
                 }
-                qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]->compr_config.fragments =
-                        COMPRESS_OFFLOAD_NUM_FRAGMENTS;
 
-                p_qap->passthrough_enabled = true;
-            }
-
-            if (qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]) {
-                DEBUG_MSG_VV("Writing Bytes(%d) to QAP_OUT_TRANSCODE_PASSTHROUGH output(%p) buff ptr(%p)",
-                    buffer_size, qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH],
-                    data_buffer_p);
-                ret = qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]->stream.write(
-                        (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH],
-                        data_buffer_p,
-                        buffer_size);
-            }
-        }
-        else if ((device & AUDIO_DEVICE_OUT_AUX_DIGITAL)
-                   && (p_qap->hdmi_connect)
-                   && (p_qap->hdmi_sink_channels > 2)) {
-
-            /* CASE 2: Multi-Channel PCM output to HDMI.
-             * If any other HDMI output is already enabled then this has to be dropped.
-             */
-
-            if (p_qap->passthrough_enabled) {
-                //Closing all the multi-Channel PCM HDMI output stream from QAP.
+                //Closing all the PCM HDMI output stream from QAP.
                 close_all_pcm_hdmi_output_l();
 
-                //If passthrough is active then pcm hdmi output has to be dropped.
-                pthread_mutex_unlock(&p_qap->lock);
-                DEBUG_MSG("Compressed passthrough enabled, DROPPING DATA!");
-                return;
-            }
-
-            /* If Media format was changed for this stream then need to re-create the stream. */
-            if (need_to_recreate_stream && qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]) {
-                DEBUG_MSG("closing MCH PCM session ox%x", (int)qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]);
-                adev_close_output_stream((struct audio_hw_device *)p_qap->adev,
-                                         (struct audio_stream_out *)(qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]));
-                qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH] = NULL;
-                p_qap->mch_pcm_hdmi_enabled = false;
-            }
-
-            if (!p_qap->mch_pcm_hdmi_enabled && !(qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH])) {
-                audio_devices_t devices;
-
-                if (event_id == AUDIO_DATA_EVENT) {
-                    config.offload_info.format = config.format = AUDIO_FORMAT_PCM_16_BIT;
-
-                    if (p_qap->hdmi_sink_channels == 8) {
-                        config.offload_info.channel_mask = config.channel_mask =
-                                AUDIO_CHANNEL_OUT_7POINT1;
-                    } else if (p_qap->hdmi_sink_channels == 6) {
-                        config.offload_info.channel_mask = config.channel_mask =
-                                AUDIO_CHANNEL_OUT_5POINT1;
-                    } else {
-                        config.offload_info.channel_mask = config.channel_mask =
-                                AUDIO_CHANNEL_OUT_STEREO;
-                    }
+                /* If Media format was changed for this stream then need to re-create the stream. */
+                if (need_to_recreate_stream && qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]) {
+                    DEBUG_MSG("closing Transcode Passthrough session ox%x",
+                        (int)qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]);
+                    adev_close_output_stream((struct audio_hw_device *)p_qap->adev,
+                                             (struct audio_stream_out *)(qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]));
+                    qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH] = NULL;
+                    p_qap->passthrough_enabled = false;
                 }
 
-                devices = AUDIO_DEVICE_OUT_AUX_DIGITAL;
-                flags = AUDIO_OUTPUT_FLAG_DIRECT;
+                if (!p_qap->passthrough_enabled
+                    && !(qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH])) {
 
-                DEBUG_MSG("Opening MCH PCM out(outputenum=%d) session ox%x with below params",
-                    QAP_OUT_OFFLOAD_MCH,
-                    (int)qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]);
+                    audio_devices_t devices;
 
-                DEBUG_MSG("sample rate=%d bitwidth=%d format = 0x%x channel mask=0x%x flags=0x%x device =0x%x",
-                    config.sample_rate,
-                    config.offload_info.bit_width,
-                    config.offload_info.format,
-                    config.offload_info.channel_mask,
-                    flags,
-                    devices);
+                    config.format = config.offload_info.format = format;
+                    config.offload_info.channel_mask = config.channel_mask = AUDIO_CHANNEL_OUT_5POINT1;
 
-                ret = adev_open_output_stream((struct audio_hw_device *)p_qap->adev,
-                                              QAP_DEFAULT_COMPR_AUDIO_HANDLE,
-                                              devices,
-                                              flags,
-                                              &config,
-                                              (struct audio_stream_out **)&(qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]),
-                                              NULL);
-                if (ret < 0) {
-                    ERROR_MSG("Failed opening MCH PCM out(outputenum=%d) session ox%x",
+                    flags = (AUDIO_OUTPUT_FLAG_NON_BLOCKING
+                             | AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD
+                             | AUDIO_OUTPUT_FLAG_DIRECT
+                             | AUDIO_OUTPUT_FLAG_COMPRESS_PASSTHROUGH);
+                    devices = AUDIO_DEVICE_OUT_AUX_DIGITAL;
+
+                    DEBUG_MSG("Opening Transcode Passthrough out(outputenum=%d) session 0x%x with below params",
+                            QAP_OUT_TRANSCODE_PASSTHROUGH,
+                            (int)qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]);
+
+                    DEBUG_MSG("sample rate=%d bitwidth=%d format = 0x%x channel mask=0x%x flags=0x%x device =0x%x",
+                        config.sample_rate,
+                        config.offload_info.bit_width,
+                        config.offload_info.format,
+                        config.offload_info.channel_mask,
+                        flags,
+                        devices);
+
+                    ret = adev_open_output_stream((struct audio_hw_device *)p_qap->adev,
+                                                  QAP_DEFAULT_COMPR_PASSTHROUGH_HANDLE,
+                                                  devices,
+                                                  flags,
+                                                  &config,
+                                                  (struct audio_stream_out **)&(qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]),
+                                                  NULL);
+                    if (ret < 0) {
+                        ERROR_MSG("Failed opening Transcode Passthrough out(outputenum=%d) session 0x%x",
+                                QAP_OUT_TRANSCODE_PASSTHROUGH,
+                                (int)qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]);
+                        pthread_mutex_unlock(&p_qap->lock);
+                        return;
+                    } else
+                        DEBUG_MSG("Opened Transcode Passthrough out(outputenum=%d) session 0x%x",
+                                QAP_OUT_TRANSCODE_PASSTHROUGH,
+                                (int)qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]);
+
+
+                    if (format == AUDIO_FORMAT_E_AC3) {
+                        qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]->compr_config.fragment_size =
+                                COMPRESS_PASSTHROUGH_DDP_FRAGMENT_SIZE;
+                    }
+                    qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]->compr_config.fragments =
+                            COMPRESS_OFFLOAD_NUM_FRAGMENTS;
+
+                    p_qap->passthrough_enabled = true;
+                }
+
+                if (qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]) {
+                    DEBUG_MSG_VV("Writing Bytes(%d) to QAP_OUT_TRANSCODE_PASSTHROUGH output(%p) buff ptr(%p)",
+                        buffer_size, qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH],
+                        data_buffer_p);
+                    ret = qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH]->stream.write(
+                            (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_TRANSCODE_PASSTHROUGH],
+                            data_buffer_p,
+                            buffer_size);
+                    if (ret > 0)
+                       qap_mod->qap_output_bytes_written[QAP_OUT_TRANSCODE_PASSTHROUGH] += ret;
+                }
+            }
+            else if ((device & AUDIO_DEVICE_OUT_AUX_DIGITAL)
+                       && (p_qap->hdmi_connect)
+                       && (p_qap->hdmi_sink_channels > 2)) {
+
+                /* CASE 2: Multi-Channel PCM output to HDMI.
+                 * If any other HDMI output is already enabled then this has to be dropped.
+                 */
+
+                if (p_qap->passthrough_enabled) {
+                    //Closing all the multi-Channel PCM HDMI output stream from QAP.
+                    close_all_pcm_hdmi_output_l();
+
+                    //If passthrough is active then pcm hdmi output has to be dropped.
+                    pthread_mutex_unlock(&p_qap->lock);
+                    DEBUG_MSG("Compressed passthrough enabled, DROPPING DATA!");
+                    return;
+                }
+
+                /* If Media format was changed for this stream then need to re-create the stream. */
+                if (need_to_recreate_stream && qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]) {
+                    DEBUG_MSG("closing MCH PCM session ox%x", (int)qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]);
+                    adev_close_output_stream((struct audio_hw_device *)p_qap->adev,
+                                             (struct audio_stream_out *)(qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]));
+                    qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH] = NULL;
+                    p_qap->mch_pcm_hdmi_enabled = false;
+                }
+
+                if (!p_qap->mch_pcm_hdmi_enabled && !(qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH])) {
+                    audio_devices_t devices;
+
+                    if (event_id == AUDIO_DATA_EVENT) {
+                        config.offload_info.format = config.format = AUDIO_FORMAT_PCM_16_BIT;
+
+                        if (p_qap->hdmi_sink_channels == 8) {
+                            config.offload_info.channel_mask = config.channel_mask =
+                                    AUDIO_CHANNEL_OUT_7POINT1;
+                        } else if (p_qap->hdmi_sink_channels == 6) {
+                            config.offload_info.channel_mask = config.channel_mask =
+                                    AUDIO_CHANNEL_OUT_5POINT1;
+                        } else {
+                            config.offload_info.channel_mask = config.channel_mask =
+                                    AUDIO_CHANNEL_OUT_STEREO;
+                        }
+                    }
+
+                    devices = AUDIO_DEVICE_OUT_AUX_DIGITAL;
+                    flags = AUDIO_OUTPUT_FLAG_DIRECT;
+
+                    DEBUG_MSG("Opening MCH PCM out(outputenum=%d) session ox%x with below params",
                         QAP_OUT_OFFLOAD_MCH,
                         (int)qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]);
-                    pthread_mutex_unlock(&p_qap->lock);
-                    return;
-                    } else
-                        DEBUG_MSG("Opened MCH PCM out(outputenum=%d) session ox%x",
+
+                    DEBUG_MSG("sample rate=%d bitwidth=%d format = 0x%x channel mask=0x%x flags=0x%x device =0x%x",
+                        config.sample_rate,
+                        config.offload_info.bit_width,
+                        config.offload_info.format,
+                        config.offload_info.channel_mask,
+                        flags,
+                        devices);
+
+                    ret = adev_open_output_stream((struct audio_hw_device *)p_qap->adev,
+                                                  QAP_DEFAULT_COMPR_AUDIO_HANDLE,
+                                                  devices,
+                                                  flags,
+                                                  &config,
+                                                  (struct audio_stream_out **)&(qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]),
+                                                  NULL);
+                    if (ret < 0) {
+                        ERROR_MSG("Failed opening MCH PCM out(outputenum=%d) session ox%x",
                             QAP_OUT_OFFLOAD_MCH,
                             (int)qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]);
+                        pthread_mutex_unlock(&p_qap->lock);
+                        return;
+                        } else
+                            DEBUG_MSG("Opened MCH PCM out(outputenum=%d) session ox%x",
+                                QAP_OUT_OFFLOAD_MCH,
+                                (int)qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]);
 
-                set_out_stream_channel_map(qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH], new_conf);
+                    set_out_stream_channel_map(qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH], new_conf);
 
-                qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]->compr_config.fragments =
-                        COMPRESS_OFFLOAD_NUM_FRAGMENTS;
-                qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]->compr_config.fragment_size =
-                        qap_get_pcm_offload_output_buffer_size(qap_mod, &config.offload_info);
+                    qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]->compr_config.fragments =
+                            COMPRESS_OFFLOAD_NUM_FRAGMENTS;
+                    qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]->compr_config.fragment_size =
+                            qap_get_pcm_offload_output_buffer_size(qap_mod, &config.offload_info);
 
-                p_qap->mch_pcm_hdmi_enabled = true;
+                    p_qap->mch_pcm_hdmi_enabled = true;
 
-                if ((qap_mod->stream_in[QAP_IN_MAIN]
-                    && qap_mod->stream_in[QAP_IN_MAIN]->client_callback != NULL) ||
-                    (qap_mod->stream_in[QAP_IN_MAIN_2]
-                    && qap_mod->stream_in[QAP_IN_MAIN_2]->client_callback != NULL)) {
+                    if ((qap_mod->stream_in[QAP_IN_MAIN]
+                        && qap_mod->stream_in[QAP_IN_MAIN]->client_callback != NULL) ||
+                        (qap_mod->stream_in[QAP_IN_MAIN_2]
+                        && qap_mod->stream_in[QAP_IN_MAIN_2]->client_callback != NULL)) {
 
-                    if (qap_mod->stream_in[QAP_IN_MAIN]) {
+                        if (qap_mod->stream_in[QAP_IN_MAIN]) {
+                            qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]->stream.set_callback(
+                                (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH],
+                                qap_mod->stream_in[QAP_IN_MAIN]->client_callback,
+                                qap_mod->stream_in[QAP_IN_MAIN]->client_cookie);
+                        }
+                        if (qap_mod->stream_in[QAP_IN_MAIN_2]) {
+                            qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]->stream.set_callback(
+                                (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH],
+                                qap_mod->stream_in[QAP_IN_MAIN_2]->client_callback,
+                                qap_mod->stream_in[QAP_IN_MAIN_2]->client_cookie);
+                        }
+                    } else if (qap_mod->stream_in[QAP_IN_PCM]
+                               && qap_mod->stream_in[QAP_IN_PCM]->client_callback != NULL) {
+
                         qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]->stream.set_callback(
-                            (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH],
-                            qap_mod->stream_in[QAP_IN_MAIN]->client_callback,
-                            qap_mod->stream_in[QAP_IN_MAIN]->client_cookie);
+                                (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH],
+                                qap_mod->stream_in[QAP_IN_PCM]->client_callback,
+                                qap_mod->stream_in[QAP_IN_PCM]->client_cookie);
                     }
-                    if (qap_mod->stream_in[QAP_IN_MAIN_2]) {
-                        qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]->stream.set_callback(
+                }
+                if (qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]) {
+                    DEBUG_MSG_VV("Writing Bytes(%d) to QAP_OUT_OFFLOAD_MCH output(%p) buff ptr(%p)",
+                        buffer_size, qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH],
+                        data_buffer_p);
+                    ret = qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]->stream.write(
                             (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH],
-                            qap_mod->stream_in[QAP_IN_MAIN_2]->client_callback,
-                            qap_mod->stream_in[QAP_IN_MAIN_2]->client_cookie);
-                    }
-                } else if (qap_mod->stream_in[QAP_IN_PCM]
-                           && qap_mod->stream_in[QAP_IN_PCM]->client_callback != NULL) {
-
-                    qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]->stream.set_callback(
-                            (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH],
-                            qap_mod->stream_in[QAP_IN_PCM]->client_callback,
-                            qap_mod->stream_in[QAP_IN_PCM]->client_cookie);
+                            data_buffer_p,
+                            buffer_size);
+                    if (ret > 0)
+                       qap_mod->qap_output_bytes_written[QAP_OUT_OFFLOAD_MCH] += ret;
                 }
             }
-            if (qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]) {
-                DEBUG_MSG_VV("Writing Bytes(%d) to QAP_OUT_OFFLOAD_MCH output(%p) buff ptr(%p)",
-                    buffer_size, qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH],
-                    data_buffer_p);
-                ret = qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH]->stream.write(
-                        (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_OFFLOAD_MCH],
-                        data_buffer_p,
-                        buffer_size);
-            }
-        }
-        else {
-            /* CASE 3: PCM output.
-             */
-
-            /* If Media format was changed for this stream then need to re-create the stream. */
-            if (need_to_recreate_stream && qap_mod->stream_out[QAP_OUT_OFFLOAD]) {
-                DEBUG_MSG("closing PCM session ox%x", (int)qap_mod->stream_out[QAP_OUT_OFFLOAD]);
-                adev_close_output_stream((struct audio_hw_device *)p_qap->adev,
-                                         (struct audio_stream_out *)(qap_mod->stream_out[QAP_OUT_OFFLOAD]));
-                qap_mod->stream_out[QAP_OUT_OFFLOAD] = NULL;
-            }
-
-            bt_stream = audio_extn_bt_hal_get_output_stream(qap_mod->bt_hdl);
-            if (bt_stream != NULL) {
-                if (qap_mod->stream_out[QAP_OUT_OFFLOAD]) {
+            else {
+                /* CASE 3: PCM output.
+                 */
+                /* If Media format was changed for this stream then need to re-create the stream. */
+                if (need_to_recreate_stream && qap_mod->stream_out[QAP_OUT_OFFLOAD]) {
+                    DEBUG_MSG("closing PCM session ox%x", (int)qap_mod->stream_out[QAP_OUT_OFFLOAD]);
                     adev_close_output_stream((struct audio_hw_device *)p_qap->adev,
                                              (struct audio_stream_out *)(qap_mod->stream_out[QAP_OUT_OFFLOAD]));
                     qap_mod->stream_out[QAP_OUT_OFFLOAD] = NULL;
                 }
 
-                audio_extn_bt_hal_out_write(p_qap->bt_hdl, data_buffer_p, buffer_size);
-            } else if (NULL == qap_mod->stream_out[QAP_OUT_OFFLOAD]) {
-                audio_devices_t devices;
+                bt_stream = audio_extn_bt_hal_get_output_stream(qap_mod->bt_hdl);
+                if (bt_stream != NULL) {
+                    if (qap_mod->stream_out[QAP_OUT_OFFLOAD]) {
+                        adev_close_output_stream((struct audio_hw_device *)p_qap->adev,
+                                                 (struct audio_stream_out *)(qap_mod->stream_out[QAP_OUT_OFFLOAD]));
+                        qap_mod->stream_out[QAP_OUT_OFFLOAD] = NULL;
+                    }
 
-                if (qap_mod->stream_in[QAP_IN_MAIN])
-                    devices = qap_mod->stream_in[QAP_IN_MAIN]->devices;
-                else
-                    devices = qap_mod->stream_in[QAP_IN_PCM]->devices;
+                    audio_extn_bt_hal_out_write(p_qap->bt_hdl, data_buffer_p, buffer_size);
+                } else if (NULL == qap_mod->stream_out[QAP_OUT_OFFLOAD]) {
+                    audio_devices_t devices;
 
-                //If multi channel pcm or passthrough is already enabled then remove the hdmi flag from device.
-                if (p_qap->mch_pcm_hdmi_enabled || p_qap->passthrough_enabled) {
-                    if (devices & AUDIO_DEVICE_OUT_AUX_DIGITAL)
-                        devices ^= AUDIO_DEVICE_OUT_AUX_DIGITAL;
-                }
-                if (devices == 0) {
-                    devices = device;
-                }
+                    if (qap_mod->stream_in[QAP_IN_MAIN])
+                        devices = qap_mod->stream_in[QAP_IN_MAIN]->devices;
+                    else
+                        devices = qap_mod->stream_in[QAP_IN_PCM]->devices;
 
-                flags = AUDIO_OUTPUT_FLAG_DIRECT;
+                    //If multi channel pcm or passthrough is already enabled then remove the hdmi flag from device.
+                    if (p_qap->mch_pcm_hdmi_enabled || p_qap->passthrough_enabled) {
+                        if (devices & AUDIO_DEVICE_OUT_AUX_DIGITAL)
+                            devices ^= AUDIO_DEVICE_OUT_AUX_DIGITAL;
+                    }
+                    if (devices == 0) {
+                        devices = device;
+                    }
 
-
-                DEBUG_MSG("Opening Stereo PCM out(outputenum=%d) session ox%x with below params",
-                    QAP_OUT_OFFLOAD,
-                    (int)qap_mod->stream_out[QAP_OUT_OFFLOAD]);
-
-
-                DEBUG_MSG("sample rate=%d bitwidth=%d format = 0x%x channel mask=0x%x flags=0x%x device =0x%x",
-                    config.sample_rate,
-                    config.offload_info.bit_width,
-                    config.offload_info.format,
-                    config.offload_info.channel_mask,
-                    flags,
-                    devices);
+                    flags = AUDIO_OUTPUT_FLAG_DIRECT;
 
 
-                /* TODO:: Need to Propagate errors to framework */
-                ret = adev_open_output_stream((struct audio_hw_device *)p_qap->adev,
-                                              QAP_DEFAULT_COMPR_AUDIO_HANDLE,
-                                              devices,
-                                              flags,
-                                              &config,
-                                              (struct audio_stream_out **)&(qap_mod->stream_out[QAP_OUT_OFFLOAD]),
-                                              NULL);
-                if (ret < 0) {
-                    ERROR_MSG("Failed opening Stereo PCM out(outputenum=%d) session ox%x",
-                        QAP_OUT_OFFLOAD,
-                        (int)qap_mod->stream_out[QAP_OUT_OFFLOAD]);
-                    pthread_mutex_unlock(&p_qap->lock);
-                    return;
-                } else
-                    DEBUG_MSG("Opened Stereo PCM out(outputenum=%d) session ox%x",
+                    DEBUG_MSG("Opening Stereo PCM out(outputenum=%d) session ox%x with below params",
                         QAP_OUT_OFFLOAD,
                         (int)qap_mod->stream_out[QAP_OUT_OFFLOAD]);
 
-                set_out_stream_channel_map(qap_mod->stream_out[QAP_OUT_OFFLOAD], new_conf);
 
-                if ((qap_mod->stream_in[QAP_IN_MAIN]
-                    && qap_mod->stream_in[QAP_IN_MAIN]->client_callback != NULL) ||
-                    (qap_mod->stream_in[QAP_IN_MAIN_2]
-                    && qap_mod->stream_in[QAP_IN_MAIN_2]->client_callback != NULL)) {
+                    DEBUG_MSG("sample rate=%d bitwidth=%d format = 0x%x channel mask=0x%x flags=0x%x device =0x%x",
+                        config.sample_rate,
+                        config.offload_info.bit_width,
+                        config.offload_info.format,
+                        config.offload_info.channel_mask,
+                        flags,
+                        devices);
 
-                    if (qap_mod->stream_in[QAP_IN_MAIN]) {
+
+                    /* TODO:: Need to Propagate errors to framework */
+                    ret = adev_open_output_stream((struct audio_hw_device *)p_qap->adev,
+                                                  QAP_DEFAULT_COMPR_AUDIO_HANDLE,
+                                                  devices,
+                                                  flags,
+                                                  &config,
+                                                  (struct audio_stream_out **)&(qap_mod->stream_out[QAP_OUT_OFFLOAD]),
+                                                  NULL);
+                    if (ret < 0) {
+                        ERROR_MSG("Failed opening Stereo PCM out(outputenum=%d) session ox%x",
+                            QAP_OUT_OFFLOAD,
+                            (int)qap_mod->stream_out[QAP_OUT_OFFLOAD]);
+                        pthread_mutex_unlock(&p_qap->lock);
+                        return;
+                    } else
+                        DEBUG_MSG("Opened Stereo PCM out(outputenum=%d) session ox%x",
+                            QAP_OUT_OFFLOAD,
+                            (int)qap_mod->stream_out[QAP_OUT_OFFLOAD]);
+
+                    set_out_stream_channel_map(qap_mod->stream_out[QAP_OUT_OFFLOAD], new_conf);
+
+                    if ((qap_mod->stream_in[QAP_IN_MAIN]
+                        && qap_mod->stream_in[QAP_IN_MAIN]->client_callback != NULL) ||
+                        (qap_mod->stream_in[QAP_IN_MAIN_2]
+                        && qap_mod->stream_in[QAP_IN_MAIN_2]->client_callback != NULL)) {
+
+                        if (qap_mod->stream_in[QAP_IN_MAIN]) {
+                            qap_mod->stream_out[QAP_OUT_OFFLOAD]->stream.set_callback(
+                                (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_OFFLOAD],
+                                qap_mod->stream_in[QAP_IN_MAIN]->client_callback,
+                                qap_mod->stream_in[QAP_IN_MAIN]->client_cookie);
+                        }
+                        if (qap_mod->stream_in[QAP_IN_MAIN_2]) {
+                            qap_mod->stream_out[QAP_OUT_OFFLOAD]->stream.set_callback(
+                                (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_OFFLOAD],
+                                qap_mod->stream_in[QAP_IN_MAIN_2]->client_callback,
+                                qap_mod->stream_in[QAP_IN_MAIN_2]->client_cookie);
+                        }
+                    } else if (qap_mod->stream_in[QAP_IN_PCM]
+                               && qap_mod->stream_in[QAP_IN_PCM]->client_callback != NULL) {
+
                         qap_mod->stream_out[QAP_OUT_OFFLOAD]->stream.set_callback(
-                            (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_OFFLOAD],
-                            qap_mod->stream_in[QAP_IN_MAIN]->client_callback,
-                            qap_mod->stream_in[QAP_IN_MAIN]->client_cookie);
+                                                    (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_OFFLOAD],
+                                                    qap_mod->stream_in[QAP_IN_PCM]->client_callback,
+                                                    qap_mod->stream_in[QAP_IN_PCM]->client_cookie);
                     }
-                    if (qap_mod->stream_in[QAP_IN_MAIN_2]) {
-                        qap_mod->stream_out[QAP_OUT_OFFLOAD]->stream.set_callback(
-                            (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_OFFLOAD],
-                            qap_mod->stream_in[QAP_IN_MAIN_2]->client_callback,
-                            qap_mod->stream_in[QAP_IN_MAIN_2]->client_cookie);
-                    }
-                } else if (qap_mod->stream_in[QAP_IN_PCM]
-                           && qap_mod->stream_in[QAP_IN_PCM]->client_callback != NULL) {
 
-                    qap_mod->stream_out[QAP_OUT_OFFLOAD]->stream.set_callback(
-                                                (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_OFFLOAD],
-                                                qap_mod->stream_in[QAP_IN_PCM]->client_callback,
-                                                qap_mod->stream_in[QAP_IN_PCM]->client_cookie);
+                    qap_mod->stream_out[QAP_OUT_OFFLOAD]->compr_config.fragments =
+                            COMPRESS_OFFLOAD_NUM_FRAGMENTS;
+                    qap_mod->stream_out[QAP_OUT_OFFLOAD]->compr_config.fragment_size =
+                            qap_get_pcm_offload_output_buffer_size(qap_mod, &config.offload_info);
+
+                    if (qap_mod->is_vol_set) {
+                        DEBUG_MSG("Setting Volume Left[%f], Right[%f]", qap_mod->vol_left, qap_mod->vol_right);
+                        qap_mod->stream_out[QAP_OUT_OFFLOAD]->stream.set_volume(
+                                (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_OFFLOAD],
+                                qap_mod->vol_left,
+                                qap_mod->vol_right);
+                    }
                 }
 
-                qap_mod->stream_out[QAP_OUT_OFFLOAD]->compr_config.fragments =
-                        COMPRESS_OFFLOAD_NUM_FRAGMENTS;
-                qap_mod->stream_out[QAP_OUT_OFFLOAD]->compr_config.fragment_size =
-                        qap_get_pcm_offload_output_buffer_size(qap_mod, &config.offload_info);
-
-                if (qap_mod->is_vol_set) {
-                    DEBUG_MSG("Setting Volume Left[%f], Right[%f]", qap_mod->vol_left, qap_mod->vol_right);
-                    qap_mod->stream_out[QAP_OUT_OFFLOAD]->stream.set_volume(
+                if (qap_mod->stream_out[QAP_OUT_OFFLOAD]) {
+                    DEBUG_MSG_VV("Writing Bytes(%d) to QAP_OUT_OFFLOAD output(%p) buff ptr(%p)",
+                        buffer_size, qap_mod->stream_out[QAP_OUT_OFFLOAD],
+                        data_buffer_p);
+                    ret = qap_mod->stream_out[QAP_OUT_OFFLOAD]->stream.write(
                             (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_OFFLOAD],
-                            qap_mod->vol_left,
-                            qap_mod->vol_right);
+                            data_buffer_p,
+                            buffer_size);
+                    if (ret > 0)
+                       qap_mod->qap_output_bytes_written[QAP_OUT_OFFLOAD] += ret;
+
                 }
             }
-
-            if (qap_mod->stream_out[QAP_OUT_OFFLOAD]) {
-                DEBUG_MSG_VV("Writing Bytes(%d) to QAP_OUT_OFFLOAD output(%p) buff ptr(%p)",
-                    buffer_size, qap_mod->stream_out[QAP_OUT_OFFLOAD],
-                    data_buffer_p);
-                ret = qap_mod->stream_out[QAP_OUT_OFFLOAD]->stream.write(
-                        (struct audio_stream_out *)qap_mod->stream_out[QAP_OUT_OFFLOAD],
-                        data_buffer_p,
-                        buffer_size);
-            }
+            DEBUG_MSG_VV("Bytes consumed [%d] by Audio HAL", ret);
         }
-        DEBUG_MSG_VV("Bytes consumed [%d] by Audio HAL", ret);
     }
     else if (event_id == QAP_CALLBACK_EVENT_EOS
                || event_id == QAP_CALLBACK_EVENT_MAIN_2_EOS
@@ -1928,6 +2037,21 @@ static void qap_session_callback(qap_session_handle_t session_handle __unused,
             set_stream_state_l(out, STOPPED);
             unlock_output_stream_l(out);
             DEBUG_MSG("sent DRAIN_READY");
+        }
+    } else if (QAP_CALLBACK_EVENT_DELAY == event_id) {
+        audio_qaf_delay_t *qaf_delay = (audio_qaf_delay_t*) buffer;
+        main_delay_event_data.algo_delay = qaf_delay->algo_delay;
+        main_delay_event_data.buffering_delay = qaf_delay->buffering_delay;
+        main_delay_event_data.non_main_data_length = qaf_delay->non_main_data_length;
+        main_delay_event_data.non_main_data_offset = qaf_delay->non_main_data_offset;
+        if (delay_event_fired == false) {
+            delay_event_fired = true;
+            DEBUG_MSG("QAP_CALLBACK_EVENT_DELAY active");
+            DEBUG_MSG("MS12 Latency/Delay event data alog delay %d, buffering delay %d non_main_data_lenght %d non_main_data_offset %d",
+                main_delay_event_data.algo_delay,
+                main_delay_event_data.buffering_delay,
+                main_delay_event_data.non_main_data_length,
+                main_delay_event_data.non_main_data_offset);
         }
     }
 
@@ -2068,37 +2192,33 @@ static void update_qap_session_init_params(audio_session_handle_t session_handle
 }
 
 /* Query HDMI EDID and sets module output accordingly.*/
-static void qap_set_hdmi_configuration_to_module()
+static int qap_set_hdmi_configuration_to_module()
 {
     int ret = 0;
     int channels = 0;
     char prop_value[PROPERTY_VALUE_MAX] = {0};
     bool passth_support = false;
-    qap_session_outputs_config_t *session_outputs_config = NULL;
+    qap_session_outputs_config_t session_outputs_config = {0};
 
 
     DEBUG_MSG("Entry");
 
     if (!p_qap) {
-        return;
+        return -EINVAL;
     }
 
     if (!p_qap->hdmi_connect) {
-        return;
+        return -EINVAL;
     }
 
     p_qap->hdmi_sink_channels = 0;
 
-    if (p_qap->qap_mod[MS12].session_handle)
-        session_outputs_config = &p_qap->qap_mod[MS12].session_outputs_config;
-    else if (p_qap->qap_mod[DTS_M8].session_handle)
-        session_outputs_config = &p_qap->qap_mod[DTS_M8].session_outputs_config;
-    else {
+    if (!p_qap->qap_mod[MS12].session_handle && !p_qap->qap_mod[DTS_M8].session_handle) {
         DEBUG_MSG("HDMI connection comes even before session is setup");
-        return;
+        return -EINVAL;
     }
 
-    session_outputs_config->num_output = 1;
+    session_outputs_config.num_output = no_of_outputs = 1;
     //QAP re-encoding and DSP offload passthrough is supported.
     if (property_get_bool("vendor.audio.offload.passthrough", false)
             && property_get_bool("vendor.audio.qap.reencode", false)) {
@@ -2106,30 +2226,31 @@ static void qap_set_hdmi_configuration_to_module()
         if (p_qap->qap_mod[MS12].session_handle) {
 
             bool do_setparam = false;
-            property_get("vendor.audio.qap.hdmi.out", prop_value, NULL);
+            if (p_qap->ms12_out_format[0] == '\0') {
+                property_get("vendor.audio.qap.hdmi.out", prop_value, NULL);
+                memcpy(p_qap->ms12_out_format, prop_value, sizeof(p_qap->ms12_out_format) - 1);
+            }
 
             if (platform_is_edid_supported_format(p_qap->adev->platform, AUDIO_FORMAT_E_AC3)
-                    && (strncmp(prop_value, "ddp", 3) == 0)) {
+                    && (strncmp(p_qap->ms12_out_format, "ddp", 3) == 0)) {
                 do_setparam = true;
-                session_outputs_config->output_config[0].format = QAP_AUDIO_FORMAT_EAC3;
-                session_outputs_config->output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_EAC3;
+                session_outputs_config.output_config[0].format = QAP_AUDIO_FORMAT_EAC3;
+                session_outputs_config.output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_EAC3;
             } else if (platform_is_edid_supported_format(p_qap->adev->platform, AUDIO_FORMAT_AC3)) {
                 do_setparam = true;
-                session_outputs_config->output_config[0].format = QAP_AUDIO_FORMAT_AC3;
-                session_outputs_config->output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_AC3;
+                session_outputs_config.output_config[0].format = QAP_AUDIO_FORMAT_AC3;
+                session_outputs_config.output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_AC3;
+                memcpy(p_qap->ms12_out_format, "dd", sizeof(p_qap->ms12_out_format) - 1);
             }
             if (do_setparam) {
                 DEBUG_MSG(" Enabling HDMI(Passthrough out) from MS12 wrapper outputid=0x%x",
-                    session_outputs_config->output_config[0].id);
-                ret = qap_session_cmd(p_qap->qap_mod[MS12].session_handle,
-                                    QAP_SESSION_CMD_SET_OUTPUTS,
-                                    sizeof(qap_session_outputs_config_t),
-                                    session_outputs_config,
-                                    NULL,
-                                    NULL);
+                    session_outputs_config.output_config[0].id);
+
+                ret = qap_session_cmd_l(p_qap->qap_mod[MS12].session_handle,
+                                        &session_outputs_config);
                 if (QAP_STATUS_OK != ret) {
                     ERROR_MSG("Unable to register AUDIO_DEVICE_OUT_HDMI device with QAP %d", ret);
-                    return;
+                    return ret;
                 }
                 passth_support = true;
             }
@@ -2140,20 +2261,16 @@ static void qap_set_hdmi_configuration_to_module()
             bool do_setparam = false;
             if (platform_is_edid_supported_format(p_qap->adev->platform, AUDIO_FORMAT_DTS)) {
                 do_setparam = true;
-                session_outputs_config->output_config[0].format = QAP_AUDIO_FORMAT_DTS;
-                session_outputs_config->output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_DTS;
+                session_outputs_config.output_config[0].format = QAP_AUDIO_FORMAT_DTS;
+                session_outputs_config.output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_DTS;
             }
 
             if (do_setparam) {
-                ret = qap_session_cmd(p_qap->qap_mod[DTS_M8].session_handle,
-                                    QAP_SESSION_CMD_SET_OUTPUTS,
-                                    sizeof(qap_session_outputs_config_t),
-                                    session_outputs_config,
-                                    NULL,
-                                    NULL);
+                ret = qap_session_cmd_l(p_qap->qap_mod[DTS_M8].session_handle,
+                                        &session_outputs_config);
                 if (QAP_STATUS_OK != ret) {
                     ERROR_MSG("Unable to register AUDIO_DEVICE_OUT_HDMI device with QAP %d", ret);
-                    return;
+                    return ret;
                 }
                 passth_support = true;
             }
@@ -2163,66 +2280,133 @@ static void qap_set_hdmi_configuration_to_module()
     if (!passth_support) {
 
         channels = platform_edid_get_max_channels(p_qap->adev->platform);
-        session_outputs_config->output_config[0].format = QAP_AUDIO_FORMAT_PCM_16_BIT;
+        session_outputs_config.output_config[0].format = QAP_AUDIO_FORMAT_PCM_16_BIT;
+        memcpy(p_qap->ms12_out_format, "pcm", sizeof(p_qap->ms12_out_format) - 1);
 
         switch (channels) {
             case 8:
                 DEBUG_MSG("Switching Qap output to 7.1 channels");
-                session_outputs_config->output_config[0].channels = 8;
+                session_outputs_config.output_config[0].channels = 8;
                 if (!p_qap->qap_msmd_enabled)
-                    session_outputs_config->output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_PCM_16_BIT;
+                    session_outputs_config.output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_PCM_16_BIT;
                 p_qap->hdmi_sink_channels = channels;
                 break;
             case 6:
                 DEBUG_MSG("Switching Qap output to 5.1 channels");
-                session_outputs_config->output_config[0].channels = 6;
+                session_outputs_config.output_config[0].channels = 6;
                 if (!p_qap->qap_msmd_enabled)
-                    session_outputs_config->output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_PCM_16_BIT;
+                    session_outputs_config.output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_PCM_16_BIT;
                 p_qap->hdmi_sink_channels = channels;
                 break;
             default:
                 DEBUG_MSG("Switching Qap output to default channels");
-                session_outputs_config->output_config[0].channels = 2;
+                session_outputs_config.output_config[0].channels = 2;
                 if (!p_qap->qap_msmd_enabled)
-                    session_outputs_config->output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_PCM_16_BIT;
+                    session_outputs_config.output_config[0].id = AUDIO_DEVICE_OUT_HDMI|QAP_AUDIO_FORMAT_PCM_16_BIT;
                 p_qap->hdmi_sink_channels = 2;
                 break;
         }
 
         if (p_qap->qap_mod[MS12].session_handle) {
-            DEBUG_MSG(" Enabling HDMI(MCH PCM out) from MS12 wrapper outputid = %x", session_outputs_config->output_config[0].id);
-            ret = qap_session_cmd(p_qap->qap_mod[MS12].session_handle,
-                                QAP_SESSION_CMD_SET_OUTPUTS,
-                                sizeof(qap_session_outputs_config_t),
-                                session_outputs_config,
-                                NULL,
-                                NULL);
+            DEBUG_MSG(" Enabling HDMI(MCH PCM out) from MS12 wrapper outputid = %x", session_outputs_config.output_config[0].id);
+            ret = qap_session_cmd_l(p_qap->qap_mod[MS12].session_handle,
+                                    &session_outputs_config);
             if (QAP_STATUS_OK != ret) {
                 ERROR_MSG("Unable to register AUDIO_DEVICE_OUT_HDMI device with QAP %d", ret);
-                return;
+                return ret;
             }
         }
         if (p_qap->qap_mod[DTS_M8].session_handle) {
-                ret = qap_session_cmd(p_qap->qap_mod[MS12].session_handle,
-                                    QAP_SESSION_CMD_SET_OUTPUTS,
-                                    sizeof(qap_session_outputs_config_t),
-                                    session_outputs_config,
-                                    NULL,
-                                    NULL);
+                ret = qap_session_cmd_l(p_qap->qap_mod[DTS_M8].session_handle,
+                                        &session_outputs_config);
                 if (QAP_STATUS_OK != ret) {
                     ERROR_MSG("Unable to register AUDIO_DEVICE_OUT_HDMI device with QAP %d", ret);
-                    return;
+                    return ret;
                 }
             }
 
     }
     DEBUG_MSG("Exit");
+    return ret;
 }
 
+static int set_ecref(bool enable) {
+
+    int status = 0;
+    qap_session_outputs_config_t session_outputs_config = {0};
+
+    if (p_qap) {
+       if (!p_qap->qap_mod[MS12].session_handle && !p_qap->qap_mod[DTS_M8].session_handle) {
+           DEBUG_MSG("EC-ref request comes but session is not setup, caching request");
+       }
+    } else
+            return -EINVAL;
+
+    if (enable) {
+        if (!ec_ref) {
+            ec_ref = enable;
+            if (proxy_out_ptr == NULL) {
+                proxy_out_ptr = fopen("/data/vendor/misc/audio/ecref", "w+");
+                if (proxy_out_ptr == NULL) {
+                    ERROR_MSG("unable to open proxy dump file");
+                    status = errno;
+                    return status;
+                } else
+                    DEBUG_MSG("Proxy dump file opened successfully at /data/vendor/misc/audio/ecref");
+            }
+
+            if (p_qap->qap_mod[MS12].session_handle) {
+               if (p_qap->hdmi_connect) {
+                  status = qap_set_hdmi_configuration_to_module();
+               } else {
+                  session_outputs_config.num_output = no_of_outputs = 1;
+                  session_outputs_config.output_config[0].id = AUDIO_DEVICE_OUT_SPEAKER;
+                  session_outputs_config.output_config[0].format = QAP_AUDIO_FORMAT_PCM_16_BIT;
+                  status = qap_session_cmd_l(p_qap->qap_mod[MS12].session_handle,
+                                             &session_outputs_config);
+               }
+               if (QAP_STATUS_OK != status) {
+                   ERROR_MSG("Unable to register ECREF with QAP %d", status);
+                   ec_ref = false;
+               } else {
+                   DEBUG_MSG("EC reference is enabled.");
+               }
+            }
+        } else {
+            DEBUG_MSG("EC ref is already enabled");
+        }
+    } else {
+         if(ec_ref) {
+            ec_ref = enable;
+            if (proxy_out_ptr) {
+                fclose(proxy_out_ptr);
+                proxy_out_ptr = NULL;
+                DEBUG_MSG("proxy dump file CLOSED, total bytes written %lld", total_bytes_written);
+                total_bytes_written = 0;
+            }
+
+            if(p_qap->qap_mod[MS12].session_handle) {
+               if (p_qap->hdmi_connect) {
+                  status = qap_set_hdmi_configuration_to_module();
+               } else {
+                  session_outputs_config.num_output = no_of_outputs = 1;
+                  session_outputs_config.output_config[0].id = AUDIO_DEVICE_OUT_SPEAKER;
+                  session_outputs_config.output_config[0].format = QAP_AUDIO_FORMAT_PCM_16_BIT;
+                  status = qap_session_cmd_l(p_qap->qap_mod[MS12].session_handle,
+                                             &session_outputs_config);
+               }
+               DEBUG_MSG("EC reference is disabled.");
+            }
+         } else {
+              DEBUG_MSG("EC ref is already disabled");
+         }
+    }
+    return status;
+}
 
 static void qap_set_default_configuration_to_module()
 {
-    qap_session_outputs_config_t *session_outputs_config = NULL;
+    qap_session_outputs_config_t session_outputs_config = {0};
     int ret = 0;
 
     DEBUG_MSG("Entry");
@@ -2239,36 +2423,24 @@ static void qap_set_default_configuration_to_module()
     //will take care as a part of data callback notifier
 
 
-    if (p_qap->qap_mod[MS12].session_handle)
-        session_outputs_config = &p_qap->qap_mod[MS12].session_outputs_config;
-    else if (p_qap->qap_mod[DTS_M8].session_handle)
-        session_outputs_config = &p_qap->qap_mod[DTS_M8].session_outputs_config;
+    session_outputs_config.num_output = no_of_outputs = 1;
 
-    session_outputs_config->num_output = 1;
-    session_outputs_config->output_config[0].id = AUDIO_DEVICE_OUT_SPEAKER;
-    session_outputs_config->output_config[0].format = QAP_AUDIO_FORMAT_PCM_16_BIT;
-
+    session_outputs_config.output_config[0].id = AUDIO_DEVICE_OUT_SPEAKER;
+    session_outputs_config.output_config[0].format = QAP_AUDIO_FORMAT_PCM_16_BIT;
 
     if (p_qap->qap_mod[MS12].session_handle) {
-        DEBUG_MSG(" Enabling speaker(PCM out) from MS12 wrapper outputid = %x", session_outputs_config->output_config[0].id);
-        ret = qap_session_cmd(p_qap->qap_mod[MS12].session_handle,
-                            QAP_SESSION_CMD_SET_OUTPUTS,
-                            sizeof(qap_session_outputs_config_t),
-                            session_outputs_config,
-                            NULL,
-                            NULL);
+        DEBUG_MSG(" Enabling speaker(PCM out) from MS12 wrapper outputid = %x", session_outputs_config.output_config[0].id);
+
+        ret = qap_session_cmd_l(p_qap->qap_mod[MS12].session_handle,
+                            &session_outputs_config);
         if (QAP_STATUS_OK != ret) {
             ERROR_MSG("Unable to register AUDIO_DEVICE_OUT_SPEAKER device with QAP %d", ret);
             return;
         }
     }
     if (p_qap->qap_mod[DTS_M8].session_handle) {
-        ret = qap_session_cmd(p_qap->qap_mod[DTS_M8].session_handle,
-                            QAP_SESSION_CMD_SET_OUTPUTS,
-                            sizeof(qap_session_outputs_config_t),
-                            session_outputs_config,
-                            NULL,
-                            NULL);
+        ret = qap_session_cmd_l(p_qap->qap_mod[DTS_M8].session_handle,
+                            &session_outputs_config);
         if (QAP_STATUS_OK != ret) {
             ERROR_MSG("Unable to register AUDIO_DEVICE_OUT_SPEAKER device with QAP %d", ret);
             return;
@@ -2276,6 +2448,59 @@ static void qap_set_default_configuration_to_module()
     }
 }
 
+static int set_ms12_output_format(const char *out_format) {
+
+   int status = 0;
+
+   if (out_format == NULL)
+       return -EINVAL;
+
+   if (p_qap) {
+       if (!p_qap->qap_mod[MS12].session_handle && !p_qap->qap_mod[DTS_M8].session_handle) {
+           ERROR_MSG("Set request recieved but session is not setup, caching request");
+           memcpy(p_qap->ms12_out_format, out_format, sizeof(p_qap->ms12_out_format) - 1);
+           return status;
+       }
+   } else
+       return -EINVAL;
+
+   if (p_qap->ms12_out_format[0] != '\0' &&
+      strncmp(p_qap->ms12_out_format, out_format, (sizeof(p_qap->ms12_out_format) - 1)) == 0) {
+      DEBUG_MSG_VV("ms12 out format %s is already active", out_format);
+      return status;
+   }
+
+   if (strncmp(out_format, "ddp", 3) == 0) {
+        if (!(p_qap->hdmi_connect &&
+              platform_is_edid_supported_format(p_qap->adev->platform, AUDIO_FORMAT_E_AC3))) {
+              ERROR_MSG("Requested hdmi output format %s is not supported by sink", out_format);
+              return -ENOTSUP;
+        }
+   } else if (strncmp(out_format, "dd", 2) == 0) {
+        if (!(p_qap->hdmi_connect &&
+             platform_is_edid_supported_format(p_qap->adev->platform, AUDIO_FORMAT_AC3))) {
+             ERROR_MSG("Requested hdmi output format %s is not supported by sink", out_format);
+             return -ENOTSUP;
+        }
+   } else if (strncmp(out_format, "pcm", 3) == 0) {
+        property_set("vendor.audio.qap.reencode", "false");
+   } else {
+        ERROR_MSG("Not supported ms12 output format: %s", out_format);
+        return -ENOTSUP;
+   }
+
+   memcpy(p_qap->ms12_out_format, out_format, sizeof(p_qap->ms12_out_format) - 1);
+
+   if (p_qap->hdmi_connect) {
+       if (strncmp(p_qap->ms12_out_format, "pcm", 3) != 0)
+           property_set("vendor.audio.qap.reencode", "true");
+
+       status = qap_set_hdmi_configuration_to_module();
+   } else
+       qap_set_default_configuration_to_module();
+
+   return 0;
+}
 
 /* Open a MM module session with QAP. */
 static int audio_extn_qap_session_open(mm_module_type mod_type, __unused struct stream_out *out)
@@ -2384,9 +2609,9 @@ void qap_module_callback(__unused qap_module_handle_t module_handle,
 {
     struct stream_out *out=(struct stream_out *)priv_data;
 
-    DEBUG_MSG("Entry");
+    DEBUG_MSG_VV("Entry");
     if (QAP_MODULE_CALLBACK_EVENT_SEND_INPUT_BUFFER == event_id) {
-        DEBUG_MSG("QAP_MODULE_CALLBACK_EVENT_SEND_INPUT_BUFFER for (%p)", out);
+        DEBUG_MSG_VV("QAP_MODULE_CALLBACK_EVENT_SEND_INPUT_BUFFER for (%p)", out);
         if (out->client_callback) {
             out->client_callback(STREAM_CBK_EVENT_WRITE_READY, NULL, out->client_cookie);
         }
@@ -2397,7 +2622,7 @@ void qap_module_callback(__unused qap_module_handle_t module_handle,
     else
         DEBUG_MSG("Un Recognized event %d", event_id);
 
-    DEBUG_MSG("exit");
+    DEBUG_MSG_VV("exit");
     return;
 }
 
@@ -2662,6 +2887,12 @@ static int qap_out_set_parameters(struct audio_stream *stream, const char *kvpai
                         (struct audio_stream *)p_qap->passthrough_out, kvpairs);
             }
         }
+    } else {
+      //Send the routing information to mm module pcm output.
+      if (qap_mod->stream_out[QAP_OUT_OFFLOAD] && !p_qap->hdmi_connect) {
+          ret = qap_mod->stream_out[QAP_OUT_OFFLOAD]->stream.common.set_parameters(
+                (struct audio_stream *)qap_mod->stream_out[QAP_OUT_OFFLOAD], kvpairs);
+      }
     }
     str_parms_destroy(parms);
 
@@ -2801,7 +3032,7 @@ int audio_extn_qap_open_output_stream(struct audio_hw_device *dev,
     }
 
     /* Override function pointers based on qap definitions */
-    out->stream.set_volume = qap_out_set_volume;
+    out->stream.set_volume = qap_set_stream_volume;
     out->stream.pause = qap_out_pause;
     out->stream.resume = qap_out_resume;
     out->stream.drain = qap_out_drain;
@@ -2884,13 +3115,28 @@ bool audio_extn_qap_is_enabled()
 int audio_extn_qap_set_parameters(struct audio_device *adev, struct str_parms *parms)
 {
     int status = 0, val = 0;
-    qap_session_outputs_config_t *session_outputs_config = NULL;
+    char value[4] = {0};
+    qap_session_outputs_config_t session_outputs_config = {0};
 
     if (!p_qap) {
         return -EINVAL;
     }
 
     DEBUG_MSG("Entry");
+
+    status = str_parms_get_int(parms, "ecref", &val);
+    if (status >= 0) {
+        if (val == 1)
+           set_ecref(true);
+        else
+           set_ecref(false);
+    }
+
+    status = str_parms_get_str(parms, "ms12_out_format", value, sizeof(value));
+    if (status > 0) {
+        status = set_ms12_output_format(value);
+        DEBUG_MSG("Set ms12 output format to %s is %s", value, status ? "failed" : "success");
+    }
 
     status = str_parms_get_int(parms, AUDIO_PARAMETER_DEVICE_CONNECT, &val);
 
@@ -2947,41 +3193,29 @@ int audio_extn_qap_set_parameters(struct audio_device *adev, struct str_parms *p
             p_qap->mch_pcm_hdmi_enabled = 0;
             p_qap->hdmi_connect = 0;
 
-            if (p_qap->qap_mod[MS12].session_handle)
-                session_outputs_config = &p_qap->qap_mod[MS12].session_outputs_config;
-            else if (p_qap->qap_mod[DTS_M8].session_handle)
-                session_outputs_config = &p_qap->qap_mod[DTS_M8].session_outputs_config;
-            else {
+            if (!p_qap->qap_mod[MS12].session_handle && !p_qap->qap_mod[DTS_M8].session_handle) {
                 DEBUG_MSG("HDMI disconnection comes even before session is setup");
                 return 0;
             }
 
-            session_outputs_config->num_output = 1;
+            session_outputs_config.num_output = no_of_outputs = 1;
 
-            session_outputs_config->output_config[0].id = AUDIO_DEVICE_OUT_SPEAKER;
-            session_outputs_config->output_config[0].format = QAP_AUDIO_FORMAT_PCM_16_BIT;
-
+            session_outputs_config.output_config[0].id = AUDIO_DEVICE_OUT_SPEAKER;
+            session_outputs_config.output_config[0].format = QAP_AUDIO_FORMAT_PCM_16_BIT;
 
             if (p_qap->qap_mod[MS12].session_handle) {
-                DEBUG_MSG(" Enabling speaker(PCM out) from MS12 wrapper outputid = %x", session_outputs_config->output_config[0].id);
-                status = qap_session_cmd(p_qap->qap_mod[MS12].session_handle,
-                                    QAP_SESSION_CMD_SET_OUTPUTS,
-                                    sizeof(qap_session_outputs_config_t),
-                                    session_outputs_config,
-                                    NULL,
-                                    NULL);
+                DEBUG_MSG(" Enabling speaker(PCM out) from MS12 wrapper outputid = %x", session_outputs_config.output_config[0].id);
+
+                status = qap_session_cmd_l(p_qap->qap_mod[MS12].session_handle,
+                                    &session_outputs_config);
                 if (QAP_STATUS_OK != status) {
                     ERROR_MSG("Unable to register AUDIO_DEVICE_OUT_SPEAKER device with QAP %d",status);
                     return -EINVAL;
                 }
             }
             if (p_qap->qap_mod[DTS_M8].session_handle) {
-                status = qap_session_cmd(p_qap->qap_mod[MS12].session_handle,
-                                    QAP_SESSION_CMD_SET_OUTPUTS,
-                                    sizeof(qap_session_outputs_config_t),
-                                    session_outputs_config,
-                                    NULL,
-                                    NULL);
+                status = qap_session_cmd_l(p_qap->qap_mod[MS12].session_handle,
+                                    &session_outputs_config);
                 if (QAP_STATUS_OK != status) {
                     ERROR_MSG("Unable to register AUDIO_DEVICE_OUT_SPEAKER device with QAP %d", status);
                     return -EINVAL;
@@ -3046,6 +3280,11 @@ int audio_extn_qap_init(struct audio_device *adev)
         DEBUG_MSG("out put thread blocking handling enabled.");
         p_qap->qap_output_block_handling = 1;
     }
+
+    if (property_get_bool("persist.vendor.audio.qap.ecref", false)) {
+        set_ecref(true);
+    }
+
     pthread_mutex_init(&p_qap->lock, (const pthread_mutexattr_t *) NULL);
 
     int i = 0;
@@ -3082,6 +3321,16 @@ int audio_extn_qap_init(struct audio_device *adev)
         } else {
             continue;
         }
+    }
+
+    no_of_outputs = 0;
+
+    for(i = 0; i<MAX_OUTPUTS;i++) {
+        cb_data_array[i].buff_ptr = malloc(MAX_OUT_BUFFER);
+        cb_data_array[i].buff_size = 0;
+        cb_data_array[i].dev_id= 0;
+        if (cb_data_array[i].buff_ptr != NULL)
+            DEBUG_MSG("buffers allocated successfully %d %p %d", i, cb_data_array[i].buff_ptr, MAX_OUT_BUFFER);
     }
 
     DEBUG_MSG("Exit");
@@ -3130,5 +3379,15 @@ void audio_extn_qap_deinit()
         free(p_qap);
         p_qap = NULL;
     }
+    for(i = 0; i<MAX_OUTPUTS;i++) {
+        free(cb_data_array[i].buff_ptr);
+         DEBUG_MSG("buffers de-allocated successfully %d", i);
+    }
+
+    no_of_outputs = 0;
+    if (property_get_bool("persist.vendor.audio.qap.ecref", false)) {
+        set_ecref(false);
+    }
+
     DEBUG_MSG("Exit");
 }
