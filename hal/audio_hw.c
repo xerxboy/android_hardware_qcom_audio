@@ -6151,8 +6151,7 @@ int adev_open_output_stream(struct audio_hw_device *dev,
         (property_get_bool("vendor.audio.matrix.limiter.enable", false)))
         platform_set_device_params(out, DEVICE_PARAM_LIMITER_ID, 1);
 
-    if (audio_is_linear_pcm(out->format) &&
-        out->flags == AUDIO_OUTPUT_FLAG_NONE && direct_dev) {
+    if (audio_is_linear_pcm(out->format) && direct_dev) {
        pthread_mutex_lock(&adev->lock);
        if (is_hdmi) {
            ALOGV("AUDIO_DEVICE_OUT_AUX_DIGITAL and DIRECT|OFFLOAD, check hdmi caps");
@@ -6246,6 +6245,14 @@ int adev_open_output_stream(struct audio_hw_device *dev,
         if (config->offload_info.sample_rate == 0)
             config->offload_info.sample_rate = config->sample_rate;
 
+        if (out->devices & AUDIO_DEVICE_OUT_AUX_DIGITAL) {
+            if (config->offload_info.format == 0)
+                config->offload_info.format = out->supported_formats[0];
+            if (config->offload_info.sample_rate == 0)
+                config->offload_info.sample_rate = out->supported_sample_rates[0];
+            if (config->offload_info.channel_mask == 0)
+                config->offload_info.channel_mask = out->supported_channel_masks[0];
+        }
         if (!is_supported_format(config->offload_info.format) &&
                 !audio_extn_passthru_is_supported_format(config->offload_info.format)) {
             ALOGE("%s: Unsupported audio format %x " , __func__, config->offload_info.format);
@@ -7691,6 +7698,8 @@ static int adev_close(hw_device_t *device)
         audio_extn_utils_release_streams_cfg_lists(
                       &adev->streams_output_cfg_list,
                       &adev->streams_input_cfg_list);
+        if (audio_extn_qap_is_enabled())
+            audio_extn_qap_deinit();
         if (audio_extn_qaf_is_enabled())
             audio_extn_qaf_deinit();
         audio_route_free(adev->audio_route);
@@ -7945,6 +7954,21 @@ static int adev_open(const hw_module_t *module, const char *name,
         *device = NULL;
         pthread_mutex_unlock(&adev_init_lock);
         return -EINVAL;
+    }
+
+    if (audio_extn_qap_is_enabled()) {
+        ret = audio_extn_qap_init(adev);
+        if (ret < 0) {
+            pthread_mutex_destroy(&adev->lock);
+            free(adev);
+            adev = NULL;
+            ALOGE("%s: Failed to init platform data, aborting.", __func__);
+            *device = NULL;
+            pthread_mutex_unlock(&adev_init_lock);
+            return ret;
+        }
+        adev->device.open_output_stream = audio_extn_qap_open_output_stream;
+        adev->device.close_output_stream = audio_extn_qap_close_output_stream;
     }
 
     if (audio_extn_qaf_is_enabled()) {
