@@ -1280,8 +1280,9 @@ static void start_tag(void *userdata __unused, const XML_Char *tag_name,
         } else if (strcmp(tag_name, "device") == 0) {
             if ((section != ACDB) && (section != AEC) && (section != NS) &&
                 (section != BACKEND_NAME) && (section != BITWIDTH) &&
-                (section != INTERFACE_NAME) && (section != OPERATOR_SPECIFIC)) {
-                ALOGE("device tag only supported for acdb/backend names/bitwitdh/interface names");
+                (section != INTERFACE_NAME) && (section != OPERATOR_SPECIFIC) &&
+                (section != DEVICE_NAME)) {
+                ALOGE("device tag only supported for acdb/backend names/bitwitdh/interface/device names");
                 return;
             }
 
